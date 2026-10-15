@@ -102,6 +102,7 @@ class MainActivity : ComponentActivity() {
         var importText by remember { mutableStateOf("") }
         var importing by remember { mutableStateOf(false) }
         var scriptsVersion by remember { mutableStateOf(0) }
+        var scriptMsg by remember { mutableStateOf<String?>(null) }
         val playerState by Player.state.collectAsState()
         val scope = rememberCoroutineScope()
 
@@ -126,9 +127,11 @@ class MainActivity : ComponentActivity() {
                     importing = false
                     if (result != null && result.providerNames.isNotEmpty()) {
                         status = result.message
+                        scriptMsg = result.message
                         scriptsVersion++
                     } else {
                         status = "导入失败：非有效的 LX 协议脚本"
+                        scriptMsg = "导入失败：非有效的 LX 协议脚本"
                     }
                 }
             }
@@ -294,6 +297,7 @@ class MainActivity : ComponentActivity() {
                             onImportTextChange = { importText = it },
                             importing = importing,
                             scriptsVersion = scriptsVersion,
+                            importMsg = scriptMsg,
                             onScriptsChanged = { scriptsVersion++ },
                             onPickFile = { scriptFilePicker.launch("*/*") },
                             onImportSubmit = {
@@ -313,9 +317,11 @@ class MainActivity : ComponentActivity() {
                                         if (result != null && result.providerNames.isNotEmpty()) {
                                             importText = ""
                                             status = result.message
+                                            scriptMsg = result.message
                                             scriptsVersion++
                                         } else {
                                             status = "导入失败：非有效的 LX 协议脚本"
+                                            scriptMsg = "导入失败：非有效的 LX 协议脚本"
                                         }
                                     }
                                 }
@@ -589,6 +595,7 @@ class MainActivity : ComponentActivity() {
         onImportTextChange: (String) -> Unit,
         importing: Boolean,
         scriptsVersion: Int,
+        importMsg: String?,
         onScriptsChanged: () -> Unit,
         onPickFile: () -> Unit,
         onImportSubmit: () -> Unit,
@@ -653,6 +660,17 @@ class MainActivity : ComponentActivity() {
                 contentPadding = PaddingValues(vertical = 12.dp)
             ) {
                 Text("从文件导入 .js 脚本", fontSize = 13.sp, fontWeight = FontWeight.Medium)
+            }
+
+            if (!importMsg.isNullOrBlank()) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    importMsg,
+                    fontSize = 12.sp,
+                    color = if (importMsg.contains("失败")) D.fav else D.accent,
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                )
             }
 
             Spacer(Modifier.height(18.dp))
