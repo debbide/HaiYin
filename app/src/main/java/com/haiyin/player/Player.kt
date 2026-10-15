@@ -107,15 +107,20 @@ object Player {
         if (dev != null) {
             // ignore taps while a pause/resume is still in flight: mashing the
             // button mid-transition is how renderers get wedged
-            if (castBusy) return
+            if (castBusy) {
+                DlnaTrace.log("toggle: IGNORED (busy)")
+                return
+            }
             lastCastActionAt = System.currentTimeMillis()
             if (_state.value.playing) {
                 // pause: flip UI now, confirm against the device on the worker
+                DlnaTrace.log("toggle: pause requested")
                 _state.value = _state.value.copy(playing = false, error = null)
                 castExecutor.execute { pauseCastPlayback(dev) }
             } else {
                 // resume: don't claim playing until the device confirms it;
                 // every failure path reports the real reason in state.error
+                DlnaTrace.log("toggle: resume requested")
                 _state.value = _state.value.copy(error = null)
                 castExecutor.execute { resumeCastPlayback(dev) }
             }
@@ -144,9 +149,11 @@ object Player {
     private fun pauseCastPlayback(dev: Dlna.Device) {
         castBusy = true
         try {
+            DlnaTrace.log("pause: sending Pause")
             try { Dlna.pause(dev) } catch (_: Exception) {}
             val endState = waitForTransportStates(dev, setOf("PAUSED_PLAYBACK", "STOPPED"), 5000)
             if (castDevice !== dev) return
+            DlnaTrace.log("pause: confirmed $endState")
             if (endState == "PAUSED_PLAYBACK" || endState == "STOPPED") {
                 _state.value = _state.value.copy(playing = false, error = null)
             } else {
@@ -174,14 +181,23 @@ object Player {
     private fun resumeCastPlayback(dev: Dlna.Device) {
         castBusy = true
         try {
+            DlnaTrace.log("resume: sending Play")
             try { Dlna.resume(dev) } catch (_: Exception) {}
             var ok = waitForTransportState(dev, "PLAYING", 5000)
             if (!ok && castDevice === dev) {
-                val s = try { Dlna.transportState(dev) } catch (_: Exception) { null }
-                if (s == "TRANSITIONING") ok = waitForTransportState(dev, "PLAYING", 5000)
+                val s = tracedTransportState(dev)
+                DlnaTrace.log("resume: Play did not start playback (now $s)")
+                if (s == "TRANSITIONING") {
+                    DlnaTrace.log("resume: TRANSITIONING, waiting it out")
+                    ok = waitForTransportState(dev, "PLAYING", 5000)
+                }
             }
-            if (!ok && castDevice === dev) ok = repushCast(dev)
+            if (!ok && castDevice === dev) {
+                DlnaTrace.log("resume: falling back to full re-push")
+                ok = repushCast(dev)
+            }
             if (castDevice !== dev) return
+            DlnaTrace.log("resume: result ok=$ok")
             if (ok) {
                 _state.value = _state.value.copy(playing = true, prepared = true, error = null)
             }
@@ -219,20 +235,23 @@ object Player {
         // pipe through the local proxy: the renderer gets a stable URL with
         // correct UA/Range handling; picky direct links stop failing on TVs.
         val proxiedUrl = try { StreamProxy.proxy(url) } catch (_: Exception) { url }
+        DlnaTrace.log("repush: sending SetAVTransportURI")
         val uriOk = try { Dlna.setUri(dev, proxiedUrl, song.name, song.singer) } catch (_: Exception) { false }
         if (castDevice !== dev) return false  // user left cast mode mid-resume
         if (!uriOk) {
+            DlnaTrace.log("repush: SetAVTransportURI rejected")
             _state.value = _state.value.copy(error = "恢复失败：设备拒绝播放地址")
             return false
         }
         // let the renderer digest the URI before Play: a Play sent mid-transition
         // is silently dropped by strict renderers (the "first play does nothing,
         // second play works" symptom)
-        waitForTransportStates(
+        val settled = waitForTransportStates(
             dev,
             setOf("STOPPED", "PAUSED_PLAYBACK", "PLAYING", "NO_MEDIA_PRESENT"),
             3000
         )
+        DlnaTrace.log("repush: settled at $settled, sending Play")
         if (castDevice !== dev) return false
         repeat(2) {
             try { Dlna.resume(dev) } catch (_: Exception) {}
@@ -242,10 +261,13 @@ object Player {
                 if (resumePos > 2000) {
                     try { Dlna.seek(dev, resumePos) } catch (_: Exception) {}
                 }
+                DlnaTrace.log("repush: PLAYING, seek to $resumePos")
                 return true
             }
+            DlnaTrace.log("repush: Play attempt did not start playback, retrying")
         }
-        val lastState = try { Dlna.transportState(dev) } catch (_: Exception) { null }
+        val lastState = tracedTransportState(dev)
+        DlnaTrace.log("repush: FAILED last=$lastState")
         _state.value = _state.value.copy(
             error = "恢复失败：设备无响应" + (lastState?.let { "（$it）" } ?: "")
         )
@@ -257,7 +279,7 @@ object Player {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
             if (castDevice !== dev) return false
-            val s = try { Dlna.transportState(dev) } catch (_: Exception) { null }
+            val s = tracedTransportState(dev)
             if (s == want) return true
             try { Thread.sleep(500) } catch (_: Exception) { return false }
         }
@@ -274,11 +296,25 @@ object Player {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
             if (castDevice !== dev) return last
-            last = try { Dlna.transportState(dev) } catch (_: Exception) { null }
+            last = tracedTransportState(dev)
             if (last != null && last in wants) return last
             try { Thread.sleep(500) } catch (_: Exception) { return last }
         }
         return last
+    }
+
+    // last transport state written to DlnaTrace; transitions are the interesting part
+    @Volatile private var lastTracedTransport: String? = null
+
+    /** GetTransportInfo with transition logging for the DLNA diagnostics view. */
+    private fun tracedTransportState(dev: Dlna.Device): String? {
+        val s = try { Dlna.transportState(dev) } catch (_: Exception) { null }
+        val prev = lastTracedTransport
+        if (s != prev) {
+            DlnaTrace.log("transport: ${prev ?: "?"} -> ${s ?: "?"}")
+            lastTracedTransport = s
+        }
+        return s
     }
 
     fun seekTo(fraction: Float) {
@@ -532,7 +568,7 @@ object Player {
                     val dev = castDevice ?: run { cancel(); return }
                     // a pause/resume is in flight: don't fight it (it owns state)
                     if (castBusy) return
-                    val stateStr = try { Dlna.transportState(dev) } catch (_: Exception) { null } ?: return
+                    val stateStr = tracedTransportState(dev) ?: return
                     val st = _state.value
 
                     // 1. If user paused playback, never treat STOPPED/PAUSED as "track finished"

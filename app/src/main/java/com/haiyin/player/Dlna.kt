@@ -288,7 +288,8 @@ object Dlna {
     }
 
     private fun soap(controlUrl: String, service: String, action: String, args: String): Boolean {
-        return try {
+        val start = android.os.SystemClock.elapsedRealtime()
+        val ok = try {
             val body = (
                 "<?xml version=\"1.0\" encoding=\"utf-8\"?>" +
                     "<s:Envelope xmlns:s=\"http://schemas.xml.org/soap/envelope/\" " +
@@ -308,6 +309,8 @@ object Dlna {
             conn.disconnect()
             code in 200..299
         } catch (_: Exception) { false }
+        DlnaTrace.log("SOAP $action -> ${if (ok) "ok" else "FAIL"} (${android.os.SystemClock.elapsedRealtime() - start}ms)")
+        return ok
     }
 
     private fun xmlEsc(s: String): String =

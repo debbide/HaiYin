@@ -20,6 +20,8 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -40,6 +42,8 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -851,6 +855,7 @@ class MainActivity : ComponentActivity() {
         onVersionLongPress: () -> Unit,
     ) {
         val bundleCount = remember(scriptsVersion) { SourceScripts.bundles().size }
+        var showDlnaLog by remember { mutableStateOf(false) }
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -871,12 +876,76 @@ class MainActivity : ComponentActivity() {
             )
             Spacer(Modifier.height(10.dp))
             SettingsRow(
+                icon = Icons.Rounded.BugReport,
+                title = "DLNA 日志",
+                subtitle = "投屏暂停/恢复的诊断记录",
+                onClick = { showDlnaLog = true }
+            )
+            Spacer(Modifier.height(10.dp))
+            SettingsRow(
                 icon = Icons.Rounded.Info,
                 title = "关于",
                 subtitle = "海音 v$versionName",
                 onLongClick = onVersionLongPress
             )
         }
+        if (showDlnaLog) DlnaLogDialog(onDismiss = { showDlnaLog = false })
+    }
+
+    @Composable
+    private fun DlnaLogDialog(onDismiss: () -> Unit) {
+        val clipboard = LocalClipboardManager.current
+        // snapshot on open; refresh by closing/reopening
+        val log = remember { DlnaTrace.dump() }
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            title = {
+                Text("DLNA 日志", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = D.textPrimary)
+            },
+            text = {
+                Column {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 380.dp)
+                            .verticalScroll(rememberScrollState())
+                            .background(D.surfaceVar, RoundedCornerShape(8.dp))
+                            .padding(10.dp)
+                    ) {
+                        Text(
+                            log.ifBlank { "暂无记录。\n\n先投屏到设备，操作一次暂停/恢复，再回来查看。" },
+                            fontSize = 11.sp,
+                            color = D.textDim,
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                        )
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                        Text(
+                            "复制",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = D.accent,
+                            modifier = Modifier.clickable {
+                                clipboard.setText(AnnotatedString(log.ifBlank { "暂无记录" }))
+                            }
+                        )
+                        Text(
+                            "清空",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = D.textDim,
+                            modifier = Modifier.clickable { DlnaTrace.clear() }
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = onDismiss) { Text("关闭", color = D.accent) }
+            },
+            containerColor = D.surface,
+            shape = RoundedCornerShape(16.dp)
+        )
     }
 
     @OptIn(ExperimentalFoundationApi::class)
