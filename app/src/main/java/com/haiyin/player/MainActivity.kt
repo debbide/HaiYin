@@ -900,6 +900,20 @@ class MainActivity : ComponentActivity() {
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize()
                 )
+                // source badge stays visible as a corner chip when art loads
+                Text(
+                    source.uppercase(),
+                    fontSize = 8.sp,
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .background(
+                            Color.Black.copy(alpha = 0.55f),
+                            RoundedCornerShape(topStart = 6.dp)
+                        )
+                        .padding(horizontal = 5.dp, vertical = 2.dp)
+                )
             } else {
                 Text(
                     source.uppercase(),
