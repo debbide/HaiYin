@@ -97,25 +97,27 @@ object Player {
     // guard: user action grace window to prevent poller race
     @Volatile private var lastCastActionAt = 0L
 
+    // guard: a pause/resume is in flight on castExecutor; the 2s poller must not
+    // fight it, and toggle taps are ignored until it settles
+    @Volatile private var castBusy = false
+
     fun toggle() {
         // while casting, the remote renderer is the real player
         val dev = castDevice
         if (dev != null) {
-            val newPlaying = !_state.value.playing
-            _state.value = _state.value.copy(playing = newPlaying)
+            // ignore taps while a pause/resume is still in flight: mashing the
+            // button mid-transition is how renderers get wedged
+            if (castBusy) return
             lastCastActionAt = System.currentTimeMillis()
-            castExecutor.execute {
-                try {
-                    if (newPlaying) {
-                        resumeCastPlayback(dev)
-                    } else {
-                        // Pause; if device rejects Pause, fallback to Stop
-                        val ok = Dlna.pause(dev)
-                        if (!ok) {
-                            Dlna.stop(dev)
-                        }
-                    }
-                } catch (_: Exception) {}
+            if (_state.value.playing) {
+                // pause: flip UI now, confirm against the device on the worker
+                _state.value = _state.value.copy(playing = false, error = null)
+                castExecutor.execute { pauseCastPlayback(dev) }
+            } else {
+                // resume: don't claim playing until the device confirms it;
+                // every failure path reports the real reason in state.error
+                _state.value = _state.value.copy(error = null)
+                castExecutor.execute { resumeCastPlayback(dev) }
             }
             appContext?.let { PlaybackService.refresh(it) }
             return
@@ -134,35 +136,101 @@ object Player {
     }
 
     /**
+     * Pause the renderer and CONFIRM it actually paused.
+     * The old Stop fallback is gone: it destroyed the media session, which made
+     * resume depend on a full re-push. If the device won't pause, say so instead
+     * of silently wedging the session.
+     */
+    private fun pauseCastPlayback(dev: Dlna.Device) {
+        castBusy = true
+        try {
+            try { Dlna.pause(dev) } catch (_: Exception) {}
+            val endState = waitForTransportStates(dev, setOf("PAUSED_PLAYBACK", "STOPPED"), 5000)
+            if (castDevice !== dev) return
+            if (endState == "PAUSED_PLAYBACK" || endState == "STOPPED") {
+                _state.value = _state.value.copy(playing = false, error = null)
+            } else {
+                // device still playing (or unreachable): revert UI, report it
+                _state.value = _state.value.copy(
+                    playing = true,
+                    error = "DLNA 设备暂停失败" + (endState?.let { "（$it）" } ?: "")
+                )
+            }
+            appContext?.let { try { PlaybackService.refresh(it) } catch (_: Exception) {} }
+        } finally {
+            castBusy = false
+        }
+    }
+
+    /**
      * Resume renderer playback robustly:
-     *  1. send Play, then poll for PLAYING — renderers go through TRANSITIONING
-     *     while re-buffering, so a single fixed-delay check false-triggers a
-     *     disruptive re-cast;
-     *  2. only re-cast (fresh URI + seek) when the renderer is in a definitive
-     *     dead state (STOPPED / PAUSED_PLAYBACK / NO_MEDIA_PRESENT) —
-     *     never interrupt TRANSITIONING.
+     *  1. try Play (covers PAUSED_PLAYBACK on well-behaved renderers);
+     *  2. TRANSITIONING gets extra time — interrupting it with SetAVTransportURI
+     *     aborts playback on strict renderers;
+     *  3. otherwise do a full re-push (SetAVTransportURI + Play + seek back);
+     *  4. every failure path reports the real reason in state.error and leaves
+     *     playing=false — never silently pretend it worked.
      */
     private fun resumeCastPlayback(dev: Dlna.Device) {
-        try { Dlna.resume(dev) } catch (_: Exception) {}
-        if (waitForTransportState(dev, "PLAYING", 8000)) return
+        castBusy = true
+        try {
+            try { Dlna.resume(dev) } catch (_: Exception) {}
+            var ok = waitForTransportState(dev, "PLAYING", 5000)
+            if (!ok && castDevice === dev) {
+                val s = try { Dlna.transportState(dev) } catch (_: Exception) { null }
+                if (s == "TRANSITIONING") ok = waitForTransportState(dev, "PLAYING", 5000)
+            }
+            if (!ok && castDevice === dev) ok = repushCast(dev)
+            if (castDevice !== dev) return
+            if (ok) {
+                _state.value = _state.value.copy(playing = true, prepared = true, error = null)
+            }
+            // on failure repushCast already set state.error with the real reason
+            appContext?.let { try { PlaybackService.refresh(it) } catch (_: Exception) {} }
+        } finally {
+            castBusy = false
+        }
+    }
 
-        val state = try { Dlna.transportState(dev) } catch (_: Exception) { null }
-        // TRANSITIONING (or unknown): the renderer is working on it — don't interrupt.
-        if (state != "STOPPED" && state != "PAUSED_PLAYBACK" && state != "NO_MEDIA_PRESENT") return
-
-        val song = currentSong() ?: return
-        val url = try { Sources.resolveUrl(song, _state.value.quality) } catch (_: Exception) { null } ?: return
+    /**
+     * Full re-push of the current track to the renderer. Returns true when the
+     * renderer reaches PLAYING. Sets state.error with the real reason on failure.
+     */
+    private fun repushCast(dev: Dlna.Device): Boolean {
+        val song = currentSong()
+        if (song == null) {
+            _state.value = _state.value.copy(error = "恢复失败：播放队列为空")
+            return false
+        }
+        val url = try { Sources.resolveUrl(song, _state.value.quality) } catch (_: Exception) { null }
+        if (url == null) {
+            val reason = SourceScripts.lastResolveError
+            _state.value = _state.value.copy(
+                error = if (reason.isNullOrBlank()) "恢复失败：解析播放地址失败"
+                else "恢复失败：$reason"
+            )
+            return false
+        }
+        val resumePos = _state.value.positionMs
+        // pipe through the local proxy: the renderer gets a stable URL with
+        // correct UA/Range handling; picky direct links stop failing on TVs.
         val proxiedUrl = try { StreamProxy.proxy(url) } catch (_: Exception) { url }
         val castOk = try { Dlna.cast(dev, proxiedUrl, song.name, song.singer) } catch (_: Exception) { false }
-        if (!castOk) return
+        if (castDevice !== dev) return false  // user left cast mode mid-resume
+        if (!castOk) {
+            _state.value = _state.value.copy(error = "恢复失败：设备投送无响应")
+            return false
+        }
+        if (!waitForTransportState(dev, "PLAYING", 10000)) {
+            _state.value = _state.value.copy(error = "恢复失败：设备无响应")
+            return false
+        }
         // Seek only after PLAYING is confirmed — blind seeks mid-transition are
         // rejected (or worse, abort playback) on strict renderers.
-        if (waitForTransportState(dev, "PLAYING", 10000)) {
-            val resumePos = _state.value.positionMs
-            if (resumePos > 2000) {
-                try { Dlna.seek(dev, resumePos) } catch (_: Exception) {}
-            }
+        if (resumePos > 2000) {
+            try { Dlna.seek(dev, resumePos) } catch (_: Exception) {}
         }
+        return true
     }
 
     /** Poll GetTransportInfo until [want] or timeout. Runs on castExecutor. */
@@ -175,6 +243,23 @@ object Player {
             try { Thread.sleep(500) } catch (_: Exception) { return false }
         }
         return false
+    }
+
+    /** Poll GetTransportInfo until the state lands in [wants]; returns the last seen state. */
+    private fun waitForTransportStates(
+        dev: Dlna.Device,
+        wants: Set<String>,
+        timeoutMs: Long
+    ): String? {
+        var last: String? = null
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (castDevice !== dev) return last
+            last = try { Dlna.transportState(dev) } catch (_: Exception) { null }
+            if (last != null && last in wants) return last
+            try { Thread.sleep(500) } catch (_: Exception) { return last }
+        }
+        return last
     }
 
     fun seekTo(fraction: Float) {
@@ -426,6 +511,8 @@ object Player {
             scheduleAtFixedRate(object : java.util.TimerTask() {
                 override fun run() {
                     val dev = castDevice ?: run { cancel(); return }
+                    // a pause/resume is in flight: don't fight it (it owns state)
+                    if (castBusy) return
                     val stateStr = try { Dlna.transportState(dev) } catch (_: Exception) { null } ?: return
                     val st = _state.value
 
