@@ -364,7 +364,55 @@ object SourceScripts {
 
     // ---------------- helpers ----------------
 
-    private fun providerLabel(providerId: String): String = when (providerId.trim().lowercase()) {
+    // ---------------- bundles (one card per imported script) ----------------
+
+    data class ScriptBundle(
+        val scriptHash: String,
+        val name: String,
+        val author: String,
+        val version: String,
+        val description: String,
+        val entries: List<ImportedSource>,
+    ) {
+        val allEnabled: Boolean get() = entries.all { it.enabled }
+    }
+
+    /** Group provider entries by script: the UI shows one card per script. */
+    @Synchronized
+    fun bundles(): List<ScriptBundle> {
+        return list().groupBy { sha1(it.script) }.values.map { entries ->
+            val first = entries.first()
+            ScriptBundle(
+                scriptHash = sha1(first.script),
+                name = first.name,
+                author = first.author,
+                version = first.version,
+                description = first.description,
+                entries = entries,
+            )
+        }
+    }
+
+    @Synchronized
+    fun setBundleEnabled(scriptHash: String, enabled: Boolean) {
+        val cur = list().toMutableList()
+        var changed = false
+        for (i in cur.indices) {
+            if (sha1(cur[i].script) == scriptHash && cur[i].enabled != enabled) {
+                cur[i] = cur[i].copy(enabled = enabled)
+                changed = true
+            }
+        }
+        if (changed) save(cur)
+    }
+
+    @Synchronized
+    fun removeBundle(scriptHash: String) {
+        save(list().filter { sha1(it.script) != scriptHash })
+    }
+
+    /** Chinese display label for a provider id (kw -> 酷我, ...). */
+    fun providerLabel(providerId: String): String = when (providerId.trim().lowercase()) {
         "tx" -> "QQ音乐"
         "wy" -> "网易云音乐"
         "kw" -> "酷我音乐"

@@ -608,7 +608,7 @@ class MainActivity : ComponentActivity() {
         onPickFile: () -> Unit,
         onImportSubmit: () -> Unit,
     ) {
-        val scriptList = remember(scriptsVersion) { SourceScripts.list() }
+        val bundles = remember(scriptsVersion) { SourceScripts.bundles() }
         val scope = rememberCoroutineScope()
 
         Column(
@@ -682,10 +682,10 @@ class MainActivity : ComponentActivity() {
             }
 
             Spacer(Modifier.height(18.dp))
-            Text("已安装的音源线路 (${scriptList.size})", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = D.textPrimary)
+            Text("已安装的音源 (${bundles.size})", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = D.textPrimary)
             Spacer(Modifier.height(8.dp))
 
-            if (scriptList.isEmpty()) {
+            if (bundles.isEmpty()) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -696,8 +696,8 @@ class MainActivity : ComponentActivity() {
                 }
             } else {
                 LazyColumn(modifier = Modifier.fillMaxWidth()) {
-                    items(scriptList.size) { i ->
-                        val entry = scriptList[i]
+                    items(bundles.size) { i ->
+                        val bundle = bundles[i]
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -709,23 +709,25 @@ class MainActivity : ComponentActivity() {
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Column(Modifier.weight(1f)) {
-                                Text(entry.name, color = D.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+                                Text(bundle.name, color = D.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1)
                                 Spacer(Modifier.height(2.dp))
                                 Text(
                                     buildString {
-                                        append(entry.providerName)
-                                        if (entry.version.isNotBlank()) append(" · ${entry.version}")
-                                        if (entry.author.isNotBlank()) append(" · ${entry.author}")
+                                        append("${bundle.entries.size} 个平台：")
+                                        append(bundle.entries.map {
+                                            SourceScripts.providerLabel(it.providerId)
+                                        }.distinct().joinToString(" · "))
+                                        if (bundle.author.isNotBlank()) append(" · ${bundle.author}")
                                     },
                                     fontSize = 11.sp,
-                                    color = if (entry.enabled) D.accent else D.textFaint
+                                    color = if (bundle.allEnabled) D.accent else D.textFaint
                                 )
                             }
                             Switch(
-                                checked = entry.enabled,
+                                checked = bundle.allEnabled,
                                 onCheckedChange = { checked ->
                                     scope.launch {
-                                        withContext(Dispatchers.IO) { SourceScripts.setEnabled(entry.id, checked) }
+                                        withContext(Dispatchers.IO) { SourceScripts.setBundleEnabled(bundle.scriptHash, checked) }
                                         onScriptsChanged()
                                     }
                                 },
@@ -745,7 +747,7 @@ class MainActivity : ComponentActivity() {
                                     .clip(RoundedCornerShape(6.dp))
                                     .clickable {
                                         scope.launch {
-                                            withContext(Dispatchers.IO) { SourceScripts.remove(entry.id) }
+                                            withContext(Dispatchers.IO) { SourceScripts.removeBundle(bundle.scriptHash) }
                                             onScriptsChanged()
                                         }
                                     }
