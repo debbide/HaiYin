@@ -588,15 +588,30 @@ object Player {
             val proxiedUrl = try { StreamProxy.proxy(url) } catch (_: Exception) { url }
             val ok = try { Dlna.cast(dev, proxiedUrl, song.name, song.singer) } catch (_: Exception) { false }
             if (!ok || castDevice !== dev) return@execute
-            // fetch total duration from renderer for the progress bar
-            val dur = try { Dlna.durationMs(dev) } catch (_: Exception) { null }
+            // fetch total duration from renderer for the progress bar; many
+            // renderers report nothing usable for proxied streams, so fall back
+            // to the search-result duration (Song.interval, "m:ss")
+            val dur = (try { Dlna.durationMs(dev) } catch (_: Exception) { null })
+                .takeIf { it != null && it > 0 } ?: parseIntervalMs(song.interval)
             _state.value = _state.value.copy(
                 resolving = false, prepared = true, playing = true,
-                positionMs = 0, durationMs = dur ?: 0L,
+                positionMs = 0, durationMs = dur,
             )
             appContext?.let { try { PlaybackService.refresh(it) } catch (_: Exception) {} }
             startCastPoller()
         }
+    }
+
+    /** Parse a "m:ss" / "h:mm:ss" duration string (Song.interval) to ms, or 0. */
+    private fun parseIntervalMs(interval: String): Long {
+        val parts = interval.split(":")
+        return try {
+            when (parts.size) {
+                2 -> (parts[0].toLong() * 60 + parts[1].toLong()) * 1000
+                3 -> (parts[0].toLong() * 3600 + parts[1].toLong() * 60 + parts[2].toLong()) * 1000
+                else -> 0L
+            }
+        } catch (_: Exception) { 0L }
     }
 
     /** Mirror play/pause to renderer. */
