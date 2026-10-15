@@ -7,6 +7,7 @@ import android.graphics.Bitmap
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
@@ -103,6 +104,35 @@ class MainActivity : ComponentActivity() {
         var scriptsVersion by remember { mutableStateOf(0) }
         val playerState by Player.state.collectAsState()
         val scope = rememberCoroutineScope()
+
+        // file picker for .js script import
+        val scriptFilePicker = rememberLauncherForActivityResult(
+            ActivityResultContracts.GetContent()
+        ) { uri ->
+            if (uri != null && !importing) {
+                importing = true
+                scope.launch {
+                    val result = withContext(Dispatchers.IO) {
+                        try {
+                            val text = contentResolver.openInputStream(uri)
+                                ?.bufferedReader()?.use { it.readText() }
+                                ?.take(8 * 1024 * 1024)
+                            if (text.isNullOrBlank()) null
+                            else SourceScripts.importFromText(text)
+                        } catch (e: Exception) {
+                            null
+                        }
+                    }
+                    importing = false
+                    if (result != null && result.providerNames.isNotEmpty()) {
+                        status = result.message
+                        scriptsVersion++
+                    } else {
+                        status = "导入失败：非有效的 LX 协议脚本"
+                    }
+                }
+            }
+        }
 
         fun doSearch() {
             if (query.isNotBlank() && !searching) {
@@ -265,6 +295,7 @@ class MainActivity : ComponentActivity() {
                             importing = importing,
                             scriptsVersion = scriptsVersion,
                             onScriptsChanged = { scriptsVersion++ },
+                            onPickFile = { scriptFilePicker.launch("*/*") },
                             onImportSubmit = {
                                 if (importText.isNotBlank() && !importing) {
                                     importing = true
@@ -559,6 +590,7 @@ class MainActivity : ComponentActivity() {
         importing: Boolean,
         scriptsVersion: Int,
         onScriptsChanged: () -> Unit,
+        onPickFile: () -> Unit,
         onImportSubmit: () -> Unit,
     ) {
         val scriptList = remember(scriptsVersion) { SourceScripts.list() }
@@ -572,7 +604,7 @@ class MainActivity : ComponentActivity() {
             Text("落雪 (LX) 音源扩展", fontSize = 17.sp, fontWeight = FontWeight.Bold, color = D.textPrimary)
             Spacer(Modifier.height(6.dp))
             Text(
-                "海音内置 QuickJS 引擎。粘贴 .js 脚本链接或代码导入，点播时自动匹配对应平台线路，无需手动绑定。",
+                "海音内置 QuickJS 引擎。粘贴脚本链接 / 代码，或从文件导入 .js，点播时自动匹配对应平台线路，无需手动绑定。",
                 fontSize = 13.sp, color = D.textDim, lineHeight = 18.sp
             )
             Spacer(Modifier.height(14.dp))
@@ -608,6 +640,19 @@ class MainActivity : ComponentActivity() {
                         Text(if (importing) "加载中…" else "安装", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                     }
                 }
+            }
+
+            Spacer(Modifier.height(10.dp))
+            OutlinedButton(
+                onClick = onPickFile,
+                enabled = !importing,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(14.dp),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = D.accent),
+                border = androidx.compose.foundation.BorderStroke(1.dp, D.surfaceBorder),
+                contentPadding = PaddingValues(vertical = 12.dp)
+            ) {
+                Text("从文件导入 .js 脚本", fontSize = 13.sp, fontWeight = FontWeight.Medium)
             }
 
             Spacer(Modifier.height(18.dp))
