@@ -1,3 +1,6 @@
+import java.io.File
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -12,8 +15,8 @@ plugins {
 //   keytool -genkeypair -v -keystore E:/keystore/haiyin-release.keystore \
 //     -alias haiyin -keyalg RSA -keysize 2048 -validity 9125
 // Back it up somewhere safe: losing it means the app can never be updated.
-val keystoreProps = java.util.Properties()
-val keystorePropsFile = rootProject.file("keystore.properties")
+val keystoreProps = Properties()
+val keystorePropsFile: File = rootProject.file("keystore.properties")
 if (keystorePropsFile.exists()) keystoreProps.load(keystorePropsFile.inputStream())
 
 android {
