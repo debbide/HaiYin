@@ -138,8 +138,8 @@ object Dlna {
 
     // ---------- SOAP control ----------
 
-    /** Set the media URL on the renderer; returns true on HTTP 200. */
-    fun cast(device: Device, url: String, title: String, artist: String): Boolean {
+    /** Set the media URI on the renderer; returns true on HTTP 200. Play is NOT sent. */
+    fun setUri(device: Device, url: String, title: String, artist: String): Boolean {
         val didl = (
             "<DIDL-Lite xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\" " +
                 "xmlns:dc=\"http://purl.org/dc/elements/1.1/\" " +
@@ -150,7 +150,7 @@ object Dlna {
                 "<res protocolInfo=\"http-get:*:*:*\">${xmlEsc(url)}</res>" +
                 "</item></DIDL-Lite>"
             )
-        val okSet = soap(
+        return soap(
             device.controlUrl,
             "urn:schemas-upnp-org:service:AVTransport:1",
             "SetAVTransportURI",
@@ -158,7 +158,11 @@ object Dlna {
                 "<CurrentURI>${xmlEsc(url)}</CurrentURI>" +
                 "<CurrentURIMetaData>${xmlEsc(didl)}</CurrentURIMetaData>"
         )
-        if (!okSet) return false
+    }
+
+    /** Set the media URL on the renderer; returns true on HTTP 200. */
+    fun cast(device: Device, url: String, title: String, artist: String): Boolean {
+        if (!setUri(device, url, title, artist)) return false
         // some renderers auto-play on set; Play is idempotent
         soap(
             device.controlUrl,

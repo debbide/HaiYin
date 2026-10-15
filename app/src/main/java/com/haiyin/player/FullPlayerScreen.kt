@@ -155,6 +155,26 @@ fun FullPlayerScreen(
 
             Spacer(Modifier.height(4.dp))
 
+            // Error banner (e.g. DLNA resume failures): fixed height so the
+            // layout doesn't jump when it appears
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(20.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                val err = st.error
+                if (!err.isNullOrBlank()) {
+                    Text(
+                        err,
+                        fontSize = 12.sp,
+                        color = D.fav,
+                        textAlign = TextAlign.Center,
+                        maxLines = 1
+                    )
+                }
+            }
+
             // Progress Slider Area
             ProgressSection(st = st)
 

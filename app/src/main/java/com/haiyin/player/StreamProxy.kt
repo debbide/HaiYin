@@ -32,8 +32,10 @@ object StreamProxy {
 
     /** Start (if needed) and return base URL like http://192.168.x.x:port */
     fun ensureRunning(): String? {
-        if (running && cachedLocalUrl != null) return cachedLocalUrl
-        try {
+        // NOTE: the local IP is re-resolved on every call — after a WiFi
+        // reconnect the phone may get a new address and a cached one would
+        // hand the renderer a dead URL.
+        return try {
             if (!running) {
                 val ss = ServerSocket()
                 ss.reuseAddress = true
@@ -44,8 +46,8 @@ object StreamProxy {
             }
             val ip = localIpAddress() ?: return null
             cachedLocalUrl = "http://$ip:${serverSocket!!.localPort}"
-            return cachedLocalUrl
-        } catch (_: Exception) { return null }
+            cachedLocalUrl
+        } catch (_: Exception) { null }
     }
 
     /** Register a proxied URL; returns the local URL to hand to the renderer. */

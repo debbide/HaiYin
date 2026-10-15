@@ -195,6 +195,10 @@ object Player {
     /**
      * Full re-push of the current track to the renderer. Returns true when the
      * renderer reaches PLAYING. Sets state.error with the real reason on failure.
+     *
+     * Cheap renderers process SetAVTransportURI asynchronously and silently drop
+     * a Play that arrives while they're still busy — so we wait for a stable
+     * state before Play, and retry Play once before giving up.
      */
     private fun repushCast(dev: Dlna.Device): Boolean {
         val song = currentSong()
@@ -215,22 +219,37 @@ object Player {
         // pipe through the local proxy: the renderer gets a stable URL with
         // correct UA/Range handling; picky direct links stop failing on TVs.
         val proxiedUrl = try { StreamProxy.proxy(url) } catch (_: Exception) { url }
-        val castOk = try { Dlna.cast(dev, proxiedUrl, song.name, song.singer) } catch (_: Exception) { false }
+        val uriOk = try { Dlna.setUri(dev, proxiedUrl, song.name, song.singer) } catch (_: Exception) { false }
         if (castDevice !== dev) return false  // user left cast mode mid-resume
-        if (!castOk) {
-            _state.value = _state.value.copy(error = "恢复失败：设备投送无响应")
+        if (!uriOk) {
+            _state.value = _state.value.copy(error = "恢复失败：设备拒绝播放地址")
             return false
         }
-        if (!waitForTransportState(dev, "PLAYING", 10000)) {
-            _state.value = _state.value.copy(error = "恢复失败：设备无响应")
-            return false
+        // let the renderer digest the URI before Play: a Play sent mid-transition
+        // is silently dropped by strict renderers (the "first play does nothing,
+        // second play works" symptom)
+        waitForTransportStates(
+            dev,
+            setOf("STOPPED", "PAUSED_PLAYBACK", "PLAYING", "NO_MEDIA_PRESENT"),
+            3000
+        )
+        if (castDevice !== dev) return false
+        repeat(2) {
+            try { Dlna.resume(dev) } catch (_: Exception) {}
+            if (waitForTransportState(dev, "PLAYING", 6000)) {
+                // Seek only after PLAYING is confirmed — blind seeks mid-transition are
+                // rejected (or worse, abort playback) on strict renderers.
+                if (resumePos > 2000) {
+                    try { Dlna.seek(dev, resumePos) } catch (_: Exception) {}
+                }
+                return true
+            }
         }
-        // Seek only after PLAYING is confirmed — blind seeks mid-transition are
-        // rejected (or worse, abort playback) on strict renderers.
-        if (resumePos > 2000) {
-            try { Dlna.seek(dev, resumePos) } catch (_: Exception) {}
-        }
-        return true
+        val lastState = try { Dlna.transportState(dev) } catch (_: Exception) { null }
+        _state.value = _state.value.copy(
+            error = "恢复失败：设备无响应" + (lastState?.let { "（$it）" } ?: "")
+        )
+        return false
     }
 
     /** Poll GetTransportInfo until [want] or timeout. Runs on castExecutor. */
