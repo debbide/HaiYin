@@ -681,6 +681,40 @@ class MainActivity : ComponentActivity() {
                 )
             }
 
+            var diagMsg by remember { mutableStateOf<String?>(null) }
+            var diagnosing by remember { mutableStateOf(false) }
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(
+                onClick = {
+                    if (!diagnosing) {
+                        diagnosing = true
+                        diagMsg = null
+                        scope.launch {
+                            diagMsg = withContext(Dispatchers.IO) { LxRuntime.diagnosePromises() }
+                            diagnosing = false
+                        }
+                    }
+                },
+                enabled = !diagnosing,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(14.dp),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = D.textDim),
+                border = androidx.compose.foundation.BorderStroke(1.dp, D.surfaceBorder),
+                contentPadding = PaddingValues(vertical = 10.dp)
+            ) {
+                Text(if (diagnosing) "诊断中…" else "诊断 JS 引擎", fontSize = 12.sp)
+            }
+            if (!diagMsg.isNullOrBlank()) {
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    diagMsg!!,
+                    fontSize = 11.sp,
+                    color = D.textDim,
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                )
+            }
+
             Spacer(Modifier.height(18.dp))
             Text("已安装的音源 (${bundles.size})", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = D.textPrimary)
             Spacer(Modifier.height(8.dp))

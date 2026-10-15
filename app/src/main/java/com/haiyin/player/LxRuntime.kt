@@ -33,6 +33,35 @@ class LxRuntime private constructor(
             scriptRuntimes.values.forEach { it.destroy() }
             scriptRuntimes.clear()
         }
+
+        /**
+         * Diagnostic: does this QuickJS build run promise microtasks after
+         * evaluate() returns? The whole LX invoke chain depends on it.
+         */
+        fun diagnosePromises(): String {
+            val qjs = try { QuickJs.create() } catch (e: Exception) {
+                return "QuickJS 创建失败：${e.message}"
+            }
+            return try {
+                qjs.evaluate(
+                    "globalThis.__diag = 'pending';" +
+                    "Promise.resolve(42).then(v => { globalThis.__diag = 'resolved:' + v; });" +
+                    "'sync';"
+                )
+                val afterFirst = qjs.evaluate("globalThis.__diag;")?.toString()
+                qjs.evaluate("'noop';")
+                val afterSecond = qjs.evaluate("globalThis.__diag;")?.toString()
+                qjs.evaluate(
+                    "(async () => { const v = await Promise.resolve(7); globalThis.__diagAsync = 'async:' + v; })();"
+                )
+                val afterAsync = qjs.evaluate("globalThis.__diagAsync;")?.toString()
+                "promise: $afterFirst -> $afterSecond | async/await: $afterAsync"
+            } catch (e: Exception) {
+                "诊断异常：${e.message}"
+            } finally {
+                try { qjs.close() } catch (_: Exception) {}
+            }
+        }
     }
 
     data class Provider(
