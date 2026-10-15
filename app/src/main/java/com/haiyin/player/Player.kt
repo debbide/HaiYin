@@ -248,6 +248,10 @@ object Player {
             DlnaTrace.log("resume: result ok=$ok")
             if (ok) {
                 _state.value = _state.value.copy(playing = true, prepared = true, error = null)
+                // The renderer restarted the stream from 0 (that's why we seek
+                // back below on STOPPED): drop the wrap-detection baseline so
+                // the 0 position isn't mistaken for a track-end loop.
+                maxCastPos = 0
                 appContext?.let { try { PlaybackService.refresh(it) } catch (_: Exception) {} }
                 // Play on a STOPPED renderer restarts the track from 0: seek
                 // back to where the pause tap left off (same song only).
@@ -310,6 +314,8 @@ object Player {
      * state before Play, and retry Play once before giving up.
      */
     private fun repushCast(dev: Dlna.Device): Boolean {
+        // full stream restart: drop the wrap-detection baseline
+        maxCastPos = 0
         val song = currentSong()
         if (song == null) {
             _state.value = _state.value.copy(error = "恢复失败：播放队列为空")
@@ -422,6 +428,9 @@ object Player {
             val dur = _state.value.durationMs
             if (dur > 0) {
                 val targetMs = (dur * fraction).toLong().coerceIn(0, dur)
+                // user-driven reposition: poller re-baselines instead of
+                // mistaking the jump for a track-end wrap
+                lastCastActionAt = System.currentTimeMillis()
                 castExecutor.execute {
                     try { Dlna.seek(dev, targetMs) } catch (_: Exception) {}
                 }
@@ -604,12 +613,20 @@ object Player {
     // guard: don't treat renderer STOPPED as "track ended" within this window after a push
     @Volatile private var lastCastPushAt = 0L
 
+    // Highest renderer position seen for the current cast track. Looping
+    // renderers never signal track end — they just re-pull the stream from 0 —
+    // so a position wrap (was far along, now near 0) while PLAYING is our
+    // end-of-track signal. Reset on every (re)push and on resume.
+    @Volatile private var maxCastPos = 0L
+
     /** Push current track to the renderer. Safe to call repeatedly. */
     fun castPushNow() {
         val dev = castDevice ?: return
         val song = currentSong() ?: return
         val qualityNow = _state.value.quality
         lastCastPushAt = System.currentTimeMillis()
+        // new stream starting: drop the wrap-detection baseline
+        maxCastPos = 0
         castExecutor.execute {
             val url = try { Sources.resolveUrl(song, qualityNow) } catch (_: Exception) { null }
             if (url == null) return@execute
@@ -707,39 +724,33 @@ object Player {
                         }
 
                         if (isNearEnd) {
-                            val nextIdx = when (st.playMode) {
-                                PlayMode.REPEAT_ONE -> st.index
-                                PlayMode.SHUFFLE -> {
-                                    if (st.queue.size <= 1) st.index
-                                    else {
-                                        var n = st.index
-                                        while (n == st.index) n = (0 until st.queue.size).random()
-                                        n
-                                    }
-                                }
-                                PlayMode.SEQUENCE -> st.index + 1
-                            }
-
-                            if (nextIdx in st.queue.indices) {
-                                DlnaTrace.log("poller: end ($stateStr), advancing ${st.index} -> $nextIdx")
-                                _state.value = st.copy(index = nextIdx, playing = true, prepared = true, positionMs = 0)
-                                appContext?.let { try { PlaybackService.refresh(it) } catch (_: Exception) {} }
-                                castPushNow()
-                            } else {
-                                DlnaTrace.log("poller: end ($stateStr), queue exhausted, stopping")
-                                _state.value = _state.value.copy(playing = false, prepared = false)
-                                castStop()
-                            }
+                            advanceCastQueue(st, "end ($stateStr)")
                             return
                         } else {
                             DlnaTrace.log("poller: $stateStr but pos=${st.positionMs}/${st.durationMs} not near end, ignoring")
                         }
                     }
 
-                    // 4. Normal playback progress & state sync
+                    // 4. Normal playback progress & state sync. Some renderers
+                    // never report STOPPED at track end — they just re-pull the
+                    // stream from 0. A position wrap (was far along, now near 0)
+                    // while PLAYING is the only end signal such renderers give.
                     val pos = try { Dlna.positionMs(dev) } catch (_: Exception) { null } ?: return
                     val inActionGrace = System.currentTimeMillis() - lastCastActionAt < 3500
                     val isPlayingNow = if (inActionGrace) _state.value.playing else (stateStr == "PLAYING")
+                    if (inActionGrace) {
+                        // user just seeked/resumed: re-baseline, never a wrap
+                        maxCastPos = pos
+                    } else if (stateStr == "PLAYING" &&
+                        maxCastPos >= 20_000 && pos <= 8_000 && maxCastPos - pos >= 20_000
+                    ) {
+                        DlnaTrace.log("poller: position wrapped ${maxCastPos}ms -> ${pos}ms with no STOPPED, treating as track end")
+                        maxCastPos = 0
+                        advanceCastQueue(st, "wrapped end")
+                        return
+                    } else if (pos > maxCastPos) {
+                        maxCastPos = pos
+                    }
                     _state.value = _state.value.copy(
                         positionMs = pos,
                         playing = isPlayingNow,
@@ -747,6 +758,36 @@ object Player {
                     )
                 }
             }, 2000, 2000)
+        }
+    }
+
+    /**
+     * Advance the DLNA queue at track end (by transport state or position wrap).
+     * [reason] goes to the diagnostics log. Must be called from the poller.
+     */
+    private fun advanceCastQueue(st: State, reason: String) {
+        val nextIdx = when (st.playMode) {
+            PlayMode.REPEAT_ONE -> st.index
+            PlayMode.SHUFFLE -> {
+                if (st.queue.size <= 1) st.index
+                else {
+                    var n = st.index
+                    while (n == st.index) n = (0 until st.queue.size).random()
+                    n
+                }
+            }
+            PlayMode.SEQUENCE -> st.index + 1
+        }
+
+        if (nextIdx in st.queue.indices) {
+            DlnaTrace.log("poller: $reason, advancing ${st.index} -> $nextIdx")
+            _state.value = st.copy(index = nextIdx, playing = true, prepared = true, positionMs = 0)
+            appContext?.let { try { PlaybackService.refresh(it) } catch (_: Exception) {} }
+            castPushNow()
+        } else {
+            DlnaTrace.log("poller: $reason, queue exhausted, stopping")
+            _state.value = _state.value.copy(playing = false, prepared = false)
+            castStop()
         }
     }
 
