@@ -282,6 +282,63 @@ object SourceScripts {
     var lastResolveError: String? = null
         private set
 
+    /**
+     * Native fallback for API-wrapper scripts when the JS engine can't run
+     * async code (QuickJS 0.9.2 never pumps promise microtasks). Extracts
+     * API_URL / API_KEY from the script and performs the musicUrl HTTP directly.
+     */
+    private fun resolveMusicUrlNative(
+        entry: ImportedSource,
+        sourceId: String,
+        song: Sources.Song,
+        quality: String,
+    ): String? {
+        val script = entry.script
+        val apiUrl = Regex("""(?:const|let|var)\s+API_URL\s*=\s*["']([^"']+)["']""")
+            .find(script)?.groupValues?.get(1)?.trim()?.trimEnd('/')
+            ?: return null
+        val apiKey = Regex("""(?:const|let|var)\s+API_KEY\s*=\s*["']([^"']*)["']""")
+            .find(script)?.groupValues?.get(1) ?: ""
+        val songId = song.id
+        if (songId.isBlank()) return null
+        val reqUrl = "$apiUrl/url?source=${urlEnc(sourceId)}&songId=${urlEnc(songId)}&quality=${urlEnc(quality)}"
+        val body = try {
+            val conn = java.net.URL(reqUrl).openConnection() as java.net.HttpURLConnection
+            conn.connectTimeout = 10000
+            conn.readTimeout = 10000
+            conn.instanceFollowRedirects = true
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.setRequestProperty("User-Agent", "lx-music-mobile/2.0.0")
+            if (apiKey.isNotEmpty()) conn.setRequestProperty("X-API-Key", apiKey)
+            val stream = if (conn.responseCode in 200..399) conn.inputStream else conn.errorStream
+            val text = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
+            conn.disconnect()
+            text
+        } catch (e: Exception) {
+            lastResolveError = "网络请求失败：${e.message}"
+            return null
+        }
+        val obj = try { JSONObject(body) } catch (_: Exception) {
+            lastResolveError = "接口返回异常"
+            return null
+        }
+        return when (val code = obj.optInt("code", -1)) {
+            200 -> obj.optString("url", "").ifEmpty {
+                lastResolveError = "接口未返回播放地址"
+                null
+            }
+            403 -> { lastResolveError = "权限不足或Key失效"; null }
+            429 -> { lastResolveError = "请求过速，请稍后再试"; null }
+            else -> {
+                lastResolveError = obj.optString("message", "未知错误").ifEmpty { "未知错误 ($code)" }
+                null
+            }
+        }
+    }
+
+    private fun urlEnc(s: String): String =
+        try { java.net.URLEncoder.encode(s, "UTF-8") } catch (_: Exception) { s }
+
     fun resolveMusicUrl(sourceId: String, song: Sources.Song, quality: String): String? {
         val ctx = appContext ?: run { lastResolveError = "SourceScripts 未初始化"; return null }
         val key = sourceId.trim().lowercase()
@@ -291,9 +348,21 @@ object SourceScripts {
             return null
         }
         val info = musicInfoJson(song, sourceId)
+        // QuickJS 0.9.2 can't run promises; API-wrapper scripts go native directly.
+        val jsAsyncWorks = LxRuntime.promisesWork()
         var lastErr: String? = null
         for (entry in candidates) {
             try {
+                if (!jsAsyncWorks) {
+                    val url = resolveMusicUrlNative(entry, key, song, quality)
+                    if (!url.isNullOrBlank()) {
+                        rememberLastUsed(key, entry.id)
+                        lastResolveError = null
+                        return url
+                    }
+                    lastErr = lastResolveError ?: "原生解析失败"
+                    continue
+                }
                 val rt = runtimes.getOrPut(sha1(entry.script)) { LxRuntime.get(ctx, entry.script) }
                 if (rt.providers.isEmpty()) {
                     try { rt.bootstrap() } catch (_: Exception) {}

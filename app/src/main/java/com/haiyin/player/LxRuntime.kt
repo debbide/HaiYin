@@ -34,6 +34,16 @@ class LxRuntime private constructor(
             scriptRuntimes.clear()
         }
 
+        @Volatile private var promisesWorkCache: Boolean? = null
+
+        /** Cached: can this QuickJS build run promise microtasks? */
+        fun promisesWork(): Boolean {
+            promisesWorkCache?.let { return it }
+            val works = diagnosePromises().contains("resolved:42")
+            promisesWorkCache = works
+            return works
+        }
+
         /**
          * Diagnostic: does this QuickJS build run promise microtasks after
          * evaluate() returns? The whole LX invoke chain depends on it.
