@@ -91,8 +91,8 @@ object Lyrics {
                 headers = mapOf("Referer" to "https://music.163.com/")
             ) ?: return null
             val o = JSONObject(body)
-            val lrc = o.optJSONObject("lrc")?.optString("lyric", "")
-                .ifEmpty { o.optJSONObject("yrc")?.optString("lyric", "") ?: "" }
+            val lrc = o.optJSONObject("lrc")?.optString("lyric", "").orEmpty()
+                .ifEmpty { o.optJSONObject("yrc")?.optString("lyric", "").orEmpty() }
             if (lrc.isBlank()) null else parseLrc(lrc).ifEmpty { null }
         } catch (_: Exception) {
             null
