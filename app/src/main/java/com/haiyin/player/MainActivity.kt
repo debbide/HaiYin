@@ -195,24 +195,6 @@ class MainActivity : ComponentActivity() {
                         )
                     } else {
                         Text("海音", fontSize = 26.sp, fontWeight = FontWeight.Black, color = D.accent)
-                        Box(
-                            modifier = Modifier
-                                .padding(start = 8.dp)
-                                .clip(RoundedCornerShape(6.dp))
-                                .background(D.surfaceBorder)
-                                .combinedClickable(
-                                    onClick = {},
-                                    onLongClick = { showCrashLog = !showCrashLog }
-                                )
-                                .padding(horizontal = 6.dp, vertical = 2.dp)
-                        ) {
-                            Text(
-                                "v" + BuildConfig.VERSION_NAME,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Medium,
-                                color = D.textDim
-                            )
-                        }
                     }
 
                     Spacer(Modifier.weight(1f))
@@ -320,8 +302,10 @@ class MainActivity : ComponentActivity() {
                         )
                         "settings" -> SettingsScreen(
                             scriptsVersion = scriptsVersion,
+                            versionName = BuildConfig.VERSION_NAME,
                             onOpenScripts = { screen = "scripts" },
                             onOpenImport = { screen = "import" },
+                            onVersionLongPress = { showCrashLog = !showCrashLog },
                         )
                         "scripts" -> SourceScriptsTabContent(
                             importText = importText,
@@ -861,8 +845,10 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun SettingsScreen(
         scriptsVersion: Int,
+        versionName: String,
         onOpenScripts: () -> Unit,
         onOpenImport: () -> Unit,
+        onVersionLongPress: () -> Unit,
     ) {
         val bundleCount = remember(scriptsVersion) { SourceScripts.bundles().size }
         Column(
@@ -883,15 +869,24 @@ class MainActivity : ComponentActivity() {
                 subtitle = "从网易云分享链接导入",
                 onClick = onOpenImport
             )
+            Spacer(Modifier.height(10.dp))
+            SettingsRow(
+                icon = Icons.Rounded.Info,
+                title = "关于",
+                subtitle = "海音 v$versionName",
+                onLongClick = onVersionLongPress
+            )
         }
     }
 
+    @OptIn(ExperimentalFoundationApi::class)
     @Composable
     private fun SettingsRow(
         icon: ImageVector,
         title: String,
         subtitle: String,
-        onClick: () -> Unit,
+        onClick: () -> Unit = {},
+        onLongClick: (() -> Unit)? = null,
     ) {
         Row(
             modifier = Modifier
@@ -899,7 +894,10 @@ class MainActivity : ComponentActivity() {
                 .clip(RoundedCornerShape(14.dp))
                 .background(D.surface)
                 .border(1.dp, D.surfaceBorder, RoundedCornerShape(14.dp))
-                .clickable(onClick = onClick)
+                .combinedClickable(
+                    onClick = onClick,
+                    onLongClick = onLongClick
+                )
                 .padding(14.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
