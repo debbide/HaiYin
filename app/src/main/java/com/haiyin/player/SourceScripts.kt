@@ -341,7 +341,7 @@ object SourceScripts {
 
     // ---------------- legacy migration ----------------
 
-    /** One-time: import old lx_scripts/*.js files into the new store. */
+    /** One-time: import old lx_scripts dir (.js files) into the new store. */
     private fun migrateLegacyDir() {
         val ctx = appContext ?: return
         val legacy = File(ctx.filesDir, "lx_scripts")
