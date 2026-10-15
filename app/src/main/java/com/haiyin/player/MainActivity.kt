@@ -113,6 +113,7 @@ class MainActivity : ComponentActivity() {
             if (uri != null && !importing) {
                 importing = true
                 scope.launch {
+                    var errMsg: String? = null
                     val result = withContext(Dispatchers.IO) {
                         try {
                             val text = contentResolver.openInputStream(uri)
@@ -121,6 +122,7 @@ class MainActivity : ComponentActivity() {
                             if (text.isNullOrBlank()) null
                             else SourceScripts.importFromText(text)
                         } catch (e: Exception) {
+                            errMsg = e.message
                             null
                         }
                     }
@@ -130,8 +132,10 @@ class MainActivity : ComponentActivity() {
                         scriptMsg = result.message
                         scriptsVersion++
                     } else {
-                        status = "导入失败：非有效的 LX 协议脚本"
-                        scriptMsg = "导入失败：非有效的 LX 协议脚本"
+                        val msg = if (!errMsg.isNullOrBlank()) "导入失败：$errMsg"
+                        else "导入失败：非有效的 LX 协议脚本"
+                        status = msg
+                        scriptMsg = msg
                     }
                 }
             }
@@ -304,12 +308,14 @@ class MainActivity : ComponentActivity() {
                                 if (importText.isNotBlank() && !importing) {
                                     importing = true
                                     scope.launch {
+                                        var errMsg: String? = null
                                         val result = withContext(Dispatchers.IO) {
                                             try {
                                                 val t = importText.trim()
                                                 if (t.startsWith("http")) SourceScripts.importFromUrl(t)
                                                 else SourceScripts.importFromText(t)
                                             } catch (e: Exception) {
+                                                errMsg = e.message
                                                 null
                                             }
                                         }
@@ -320,8 +326,10 @@ class MainActivity : ComponentActivity() {
                                             scriptMsg = result.message
                                             scriptsVersion++
                                         } else {
-                                            status = "导入失败：非有效的 LX 协议脚本"
-                                            scriptMsg = "导入失败：非有效的 LX 协议脚本"
+                                            val msg = if (!errMsg.isNullOrBlank()) "导入失败：$errMsg"
+                                            else "导入失败：非有效的 LX 协议脚本"
+                                            status = msg
+                                            scriptMsg = msg
                                         }
                                     }
                                 }

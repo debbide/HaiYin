@@ -180,7 +180,7 @@ object SourceScripts {
         val providers = try {
             rt.bootstrap()
         } catch (e: Exception) {
-            throw IllegalStateException("脚本初始化失败")
+            throw IllegalStateException("脚本初始化失败：${e.message}")
         }
         if (providers.isEmpty()) throw IllegalStateException("脚本中没有可用的提供方")
 
