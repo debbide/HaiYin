@@ -660,6 +660,10 @@ class MainActivity : ComponentActivity() {
     ) {
         val bundles = remember(scriptsVersion) { SourceScripts.bundles() }
         val scope = rememberCoroutineScope()
+        // update alerts live on the script runtimes, so they need their own tick
+        var alertsVersion by remember { mutableStateOf(0) }
+        val updateAlerts = remember(alertsVersion, scriptsVersion) { SourceScripts.updateAlerts() }
+        val alertsByHash = updateAlerts.associateBy { it.scriptHash }
 
         Column(
             modifier = Modifier
@@ -765,6 +769,42 @@ class MainActivity : ComponentActivity() {
                 )
             }
 
+            var checkingUpdates by remember { mutableStateOf(false) }
+            var checkMsg by remember { mutableStateOf<String?>(null) }
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(
+                onClick = {
+                    if (!checkingUpdates) {
+                        checkingUpdates = true
+                        checkMsg = null
+                        scope.launch {
+                            val count = withContext(Dispatchers.IO) { SourceScripts.checkUpdates() }
+                            alertsVersion++
+                            checkMsg = if (count > 0) "有 $count 个音源可更新" else "所有音源均为最新"
+                            checkingUpdates = false
+                        }
+                    }
+                },
+                enabled = !checkingUpdates && bundles.isNotEmpty(),
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(14.dp),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = D.textDim),
+                border = androidx.compose.foundation.BorderStroke(1.dp, D.surfaceBorder),
+                contentPadding = PaddingValues(vertical = 10.dp)
+            ) {
+                Text(if (checkingUpdates) "检查中…" else "检查音源更新", fontSize = 12.sp)
+            }
+            if (!checkMsg.isNullOrBlank()) {
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    checkMsg!!,
+                    fontSize = 11.sp,
+                    color = if (checkMsg!!.contains("可更新")) D.accent else D.textDim,
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                )
+            }
+
             Spacer(Modifier.height(18.dp))
             Text("已安装的音源 (${bundles.size})", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = D.textPrimary)
             Spacer(Modifier.height(8.dp))
@@ -806,6 +846,18 @@ class MainActivity : ComponentActivity() {
                                     fontSize = 11.sp,
                                     color = if (bundle.allEnabled) D.accent else D.textFaint
                                 )
+                                alertsByHash[bundle.scriptHash]?.let { alert ->
+                                    Spacer(Modifier.height(4.dp))
+                                    Text(
+                                        buildString {
+                                            append("可更新")
+                                            if (alert.message.isNotBlank()) append("：${alert.message}")
+                                        },
+                                        fontSize = 11.sp,
+                                        color = D.accent,
+                                        maxLines = 2
+                                    )
+                                }
                             }
                             Switch(
                                 checked = bundle.allEnabled,

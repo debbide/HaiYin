@@ -74,6 +74,14 @@ object SourceScripts {
         val message: String,
     )
 
+    /** A script that told us a newer version of itself exists. */
+    data class ScriptUpdate(
+        val scriptHash: String,
+        val scriptName: String,
+        val message: String,
+        val url: String,
+    )
+
     private const val STORE_FILE = "imported_sources.json"
     private const val PREFS = "lx_source_prefs"
     private const val KEY_LAST_USED = "last_used:"
@@ -166,6 +174,22 @@ object SourceScripts {
     }
 
     /**
+     * Best-effort metadata for CeruMusic plugins, which declare a `pluginInfo`
+     * object literal instead of the `@name` header LX scripts use. Returns whatever
+     * of name/version/author/description it can find; empty map when absent.
+     */
+    private fun extractPluginMeta(script: String): Map<String, String> {
+        val out = HashMap<String, String>()
+        val block = Regex("""pluginInfo\s*=\s*\{([\s\S]{0,1500}?)\n?\}""")
+            .find(script)?.groupValues?.get(1) ?: return out
+        for (key in listOf("name", "version", "author", "description")) {
+            Regex("""["']?""" + key + """["']?\s*:\s*["']([^"']*)["']""")
+                .find(block)?.let { out[key] = it.groupValues[1].trim() }
+        }
+        return out
+    }
+
+    /**
      * Import a script. Bootstraps it (blocking — call on IO thread),
      * expands to one entry per provider, dedups by (providerId + script hash).
      */
@@ -174,7 +198,11 @@ object SourceScripts {
         val ctx = appContext ?: throw IllegalStateException("SourceScripts not initialized")
         val payload = normalizePayload(rawInput)
         val script = payload.script
-        if (!script.contains("lx")) throw IllegalStateException("非有效的 LX 协议脚本")
+        // LX scripts touch `lx`; CeruMusic v1 plugins are CommonJS modules that talk
+        // through `cerumusic`. Accept either and reject everything else early.
+        val isLx = script.contains("lx")
+        val isCr = script.contains("cerumusic") || script.contains("module.exports")
+        if (!isLx && !isCr) throw IllegalStateException("非有效的 LX / CeruMusic 协议脚本")
 
         val rt = LxRuntime.get(ctx, script)
         val providers = try {
@@ -184,7 +212,12 @@ object SourceScripts {
         }
         if (providers.isEmpty()) throw IllegalStateException("脚本中没有可用的提供方")
 
-        val bundleName = payload.name.ifEmpty { extractScriptName(script) }
+        // CeruMusic plugins declare metadata in a `pluginInfo` object rather than in
+        // the import dialog, so fill any gaps from the script text itself.
+        val meta = extractPluginMeta(script)
+        val bundleName = payload.name
+            .ifEmpty { meta["name"].orEmpty() }
+            .ifEmpty { extractScriptName(script) }
         val scriptHash = sha1(script)
         val current = list().toMutableList()
         var added = 0
@@ -207,9 +240,9 @@ object SourceScripts {
                 script = script,
                 qualities = prov.qualitys,
                 enabled = existing?.enabled ?: true,
-                author = payload.author,
-                version = payload.version,
-                description = payload.description,
+                author = payload.author.ifEmpty { meta["author"].orEmpty() },
+                version = payload.version.ifEmpty { meta["version"].orEmpty() },
+                description = payload.description.ifEmpty { meta["description"].orEmpty() },
             )
             if (existing != null) {
                 current[current.indexOf(existing)] = entry
@@ -219,6 +252,8 @@ object SourceScripts {
             }
         }
         save(current)
+        // a re-import of a newer build leaves the previous build's runtime orphaned
+        pruneRuntimes()
 
         val displayName = bundleName.ifEmpty { names.firstOrNull() ?: "音源" }
         val message = if (added > 0)
@@ -249,6 +284,28 @@ object SourceScripts {
     @Synchronized
     fun remove(id: String) {
         save(list().filter { it.id != id })
+        pruneRuntimes()
+    }
+
+    /**
+     * Tear down runtimes that no longer belong to any stored entry.
+     *
+     * Without this, removing a source — or importing a newer build of one, which
+     * hashes differently and therefore gets a fresh runtime — leaves its QuickJS
+     * context alive for the life of the process. Nothing else calls
+     * [LxRuntime.shutdownAll], so this is the only place runtimes get freed.
+     */
+    private fun pruneRuntimes() {
+        val entries = list()
+        val liveHashes = entries.map { sha1(it.script) }.toSet()
+        val liveScripts = entries.map { it.script }.toSet()
+
+        // drop our own handles on scripts that are gone
+        runtimes.keys.filter { it !in liveHashes }.forEach { runtimes.remove(it) }
+
+        // and tear down the engines themselves. This also catches runtimes created
+        // only during import, which never entered `runtimes`.
+        LxRuntime.releaseAllExcept(liveScripts)
     }
 
     // ---------------- resolve (auto-match, no binding UI) ----------------
@@ -262,7 +319,11 @@ object SourceScripts {
             .sortedBy { if (it.id == lastUsedId) 0 else 1 }
     }
 
-    private fun musicInfoJson(song: Sources.Song, sourceId: String): String =
+    private fun musicInfoJson(
+        song: Sources.Song,
+        sourceId: String,
+        qualities: List<String> = emptyList(),
+    ): String =
         JSONObject().apply {
             put("songmid", song.id)
             put("id", song.id)
@@ -270,6 +331,15 @@ object SourceScripts {
             put("name", song.name)
             put("singer", song.singer)
             put("source", sourceId)
+            // Scripts read these for display and quality negotiation; omitting them
+            // made some of them bail out or fall back to 128k.
+            put("albumName", song.album)
+            put("album", song.album)
+            put("interval", song.interval)
+            put("_interval", song.interval)
+            put("picUrl", song.img)
+            put("img", song.img)
+            if (qualities.isNotEmpty()) put("qualitys", JSONArray(qualities))
         }.toString()
 
     /**
@@ -302,7 +372,13 @@ object SourceScripts {
             .find(script)?.groupValues?.get(1) ?: ""
         val songId = song.id
         if (songId.isBlank()) return null
-        val reqUrl = "$apiUrl/url?source=${urlEnc(sourceId)}&songId=${urlEnc(songId)}&quality=${urlEnc(quality)}"
+        // Scripts declare API_URL either with the music endpoint already on it
+        // (v7: ".../api/music") or as a plain base with the sub-path added later
+        // (v8.9.1: ".../api" + "/music/url"). Normalise to the full path — hardcoding
+        // "$apiUrl/url" produced ".../api/url" for the latter and 404'd.
+        val base = apiUrl.trimEnd('/')
+        val musicBase = if (base.endsWith("/music")) base else "$base/music"
+        val reqUrl = "$musicBase/url?source=${urlEnc(sourceId)}&songId=${urlEnc(songId)}&quality=${urlEnc(quality)}"
         val body = try {
             val conn = java.net.URL(reqUrl).openConnection() as java.net.HttpURLConnection
             conn.connectTimeout = 10000
@@ -348,11 +424,11 @@ object SourceScripts {
             lastResolveError = "没有可用线路（${key}）"
             return null
         }
-        val info = musicInfoJson(song, sourceId)
         // If the JS engine can't run promises, API-wrapper scripts go native directly.
         val jsAsyncWorks = LxRuntime.promisesWork()
         var lastErr: String? = null
         for (entry in candidates) {
+            val info = musicInfoJson(song, sourceId, entry.qualities)
             try {
                 if (!jsAsyncWorks) {
                     val url = resolveMusicUrlNative(entry, key, song, quality)
@@ -392,8 +468,8 @@ object SourceScripts {
         val ctx = appContext ?: return null
         val candidates = candidatesFor(sourceId)
         if (candidates.isEmpty()) return null
-        val info = musicInfoJson(song, sourceId)
         for (entry in candidates) {
+            val info = musicInfoJson(song, sourceId, entry.qualities)
             try {
                 val rt = runtimes.getOrPut(sha1(entry.script)) { LxRuntime.get(ctx, entry.script) }
                 if (rt.providers.isEmpty()) {
@@ -476,6 +552,57 @@ object SourceScripts {
         }
     }
 
+    // ---------------- update alerts ----------------
+
+    /**
+     * Update alerts raised by scripts that have already bootstrapped in this
+     * process. A script only learns about its own updates after it has run once,
+     * so this fills in lazily; use [checkUpdates] to force the issue.
+     */
+    fun updateAlerts(): List<ScriptUpdate> = runtimes.mapNotNull { (hash, rt) ->
+        val alert = rt.updateAlert ?: return@mapNotNull null
+        ScriptUpdate(
+            scriptHash = hash,
+            scriptName = alert.scriptName.ifBlank { hash.take(8) },
+            message = alert.message,
+            url = alert.url,
+        )
+    }
+
+    /**
+     * Boot every enabled script so each can report its own update status, then
+     * return how many have a newer version available. Blocking — call from IO.
+     *
+     * A script's update check fires during bootstrap and is now queued and
+     * replayed (see LxRuntime), so it needs a moment to come back over the wire
+     * before we count the alerts.
+     */
+    fun checkUpdates(): Int {
+        val ctx = appContext ?: return 0
+        for (bundle in bundles()) {
+            if (!bundle.allEnabled) continue
+            try {
+                val rt = runtimes.getOrPut(bundle.scriptHash) {
+                    LxRuntime.get(ctx, bundle.entries.first().script)
+                }
+                rt.bootstrap()
+            } catch (_: Exception) {
+                // one broken script must not stop the others from being checked
+            }
+        }
+        // The update checks are now in flight (they were queued during bootstrap and
+        // replayed). Wait for them to actually land rather than sleeping a guess —
+        // a cold TLS handshake can easily outlast a fixed delay.
+        val deadline = System.currentTimeMillis() + 8_000
+        while (System.currentTimeMillis() < deadline) {
+            if (runtimes.values.none { it.inFlightRequests() > 0 }) break
+            try { Thread.sleep(120) } catch (_: InterruptedException) { break }
+        }
+        // let the last response's microtask chain reach lx.send('updateAlert')
+        try { Thread.sleep(300) } catch (_: InterruptedException) {}
+        return updateAlerts().size
+    }
+
     @Synchronized
     fun setBundleEnabled(scriptHash: String, enabled: Boolean) {
         val cur = list().toMutableList()
@@ -492,6 +619,7 @@ object SourceScripts {
     @Synchronized
     fun removeBundle(scriptHash: String) {
         save(list().filter { sha1(it.script) != scriptHash })
+        pruneRuntimes()
     }
 
     /** Chinese display label for a provider id (kw -> 酷我, ...). */

@@ -13,3 +13,18 @@ captures/
 *.keystore
 *.jks
 keystore.properties
+
+# 私钥一律不入库（含本项目专用 SSH key）
+*.pem
+id_rsa*
+id_ed25519*
+id_ecdsa*
+*.ppk
+
+# 本地参考资料 / 第三方产物 / 凭据，不入库
+/vanta-main/
+/.workbuddy-ai/
+*.ipa
+聆澜音源*.js
+tools/linglan_re.py
+tools/gyd_cr2_shims.js
