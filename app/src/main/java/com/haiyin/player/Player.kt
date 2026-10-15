@@ -3,6 +3,7 @@ package com.haiyin.player
 import android.content.Context
 import android.media.AudioAttributes
 import android.media.MediaPlayer
+import android.net.wifi.WifiManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
@@ -580,6 +581,34 @@ object Player {
     /** True if currently casting (follow mode). */
     val casting: Boolean get() = castDevice != null
 
+    // DLNA cast turns this phone into an HTTP server: the renderer pulls the
+    // audio from StreamProxy running here. Keep the WiFi radio from dozing
+    // while a cast session is live, or the socket stalls the moment the screen
+    // goes off — the renderer then plays out its buffer and goes silent while
+    // still reporting PLAYING ("no sound but not disconnected").
+    private var dlnaWifiLock: WifiManager.WifiLock? = null
+
+    private fun acquireDlnaWifiLock() {
+        try {
+            if (dlnaWifiLock?.isHeld == true) return
+            val wm = appContext?.getSystemService(Context.WIFI_SERVICE) as? WifiManager ?: return
+            dlnaWifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "haiyin-dlna").apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        } catch (_: Exception) {
+            dlnaWifiLock = null
+        }
+    }
+
+    private fun releaseDlnaWifiLock() {
+        try {
+            dlnaWifiLock?.let { if (it.isHeld) it.release() }
+        } catch (_: Exception) {
+        }
+        dlnaWifiLock = null
+    }
+
     private val castExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
         Thread(r, "dlna-follow").apply { isDaemon = true }
     }
@@ -588,6 +617,7 @@ object Player {
     @Synchronized
     fun enterCastMode(dev: Dlna.Device) {
         castDevice = dev
+        acquireDlnaWifiLock()
         // kill local playback immediately & bump generation so stale callbacks die
         generation++
         stopTicker()
@@ -676,6 +706,7 @@ object Player {
     fun castStop() {
         val dev = castDevice ?: return
         castDevice = null
+        releaseDlnaWifiLock()
         stopCastPoller()
         castExecutor.execute {
             try { Dlna.stop(dev) } catch (_: Exception) {}

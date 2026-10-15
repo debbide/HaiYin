@@ -204,12 +204,18 @@ class PlaybackService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_START) {
             ensureMediaSession(this)
-            if (hasNotifPermission(this)) {
-                try {
-                    ensureChannel(this)
-                    startForeground(NOTIF_ID, buildNotif(this))
-                } catch (_: Exception) {}
-            }
+            // Claim foreground status unconditionally. On Android 13+ the
+            // notification is merely hidden when POST_NOTIFICATIONS is denied —
+            // the service still gets foreground priority. Gating this on the
+            // permission left us a plain background service that the system may
+            // kill minutes after the app is backgrounded; with the process dead,
+            // the DLNA proxy (this phone is the HTTP server) stops feeding the
+            // renderer and playback goes silent mid-song while the renderer
+            // still reports PLAYING.
+            try {
+                ensureChannel(this)
+                startForeground(NOTIF_ID, buildNotif(this))
+            } catch (_: Exception) {}
         }
         return START_STICKY
     }
