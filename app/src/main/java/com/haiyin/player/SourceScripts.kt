@@ -283,9 +283,10 @@ object SourceScripts {
         private set
 
     /**
-     * Native fallback for API-wrapper scripts when the JS engine can't run
-     * async code (QuickJS 0.9.2 never pumps promise microtasks). Extracts
-     * API_URL / API_KEY from the script and performs the musicUrl HTTP directly.
+     * Native fallback for API-wrapper scripts, kept as a safety net for the case
+     * the JS engine can't run async code. With the harlonwang engine promises work,
+     * so this path is normally dormant. Extracts API_URL / API_KEY from the script
+     * and performs the musicUrl HTTP directly.
      */
     private fun resolveMusicUrlNative(
         entry: ImportedSource,
@@ -348,7 +349,7 @@ object SourceScripts {
             return null
         }
         val info = musicInfoJson(song, sourceId)
-        // QuickJS 0.9.2 can't run promises; API-wrapper scripts go native directly.
+        // If the JS engine can't run promises, API-wrapper scripts go native directly.
         val jsAsyncWorks = LxRuntime.promisesWork()
         var lastErr: String? = null
         for (entry in candidates) {

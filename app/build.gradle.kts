@@ -83,8 +83,8 @@ dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.media:media:1.7.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
-    // QuickJS engine for lx-protocol source scripts
-    implementation("app.cash.quickjs:quickjs-android:0.9.2")
+    // QuickJS engine (harlonwang wrapper: 16KB page-aligned native lib, working promises)
+    implementation("wang.harlon.quickjs:wrapper-android:3.2.3")
     implementation("org.json:json:20240303")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 }

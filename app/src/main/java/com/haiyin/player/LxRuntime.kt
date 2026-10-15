@@ -1,22 +1,35 @@
 package com.haiyin.player
 
 import android.content.Context
-import app.cash.quickjs.QuickJs
+import com.whl.quickjs.android.QuickJSLoader
+import com.whl.quickjs.wrapper.JSCallFunction
+import com.whl.quickjs.wrapper.QuickJSContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.concurrent.Callable
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.atomic.AtomicLong
 
 /**
- * lx-protocol JS runtime (QuickJS), ported from Vanta's flutter_js bridge design:
+ * lx-protocol JS runtime (QuickJS via wang.harlon.quickjs:wrapper-android),
+ * ported from Vanta's flutter_js bridge design:
  *  - JS land keeps a callback table; native <-> JS talk via __hyBridge.post()
  *  - lx.request sends a message to native (JSON string); native does HTTP on its own
  *    executor and calls back into JS with the response
  *  - requests are serialized per runtime (JS engines are single-threaded)
  *  - bootstrap window answers lx.request with a fake response so scripts don't break
+ *
+ * Engine notes (harlonwang wrapper):
+ *  - every evaluate()/call() drains the promise microtask queue (JS_ExecutePendingJob),
+ *    so async/await actually works — unlike app.cash.quickjs 0.9.2, which never did
+ *  - all context access MUST happen on the thread that created it (checkSameThread);
+ *    everything funnels through onJsThread()
+ *  - native lib is 16KB page-aligned (ELF LOAD segments = 0x4000), no 16KB-device warning
+ *  - an unhandled promise rejection makes the next evaluate() throw QuickJSException;
+ *    our invoke chain always ends with .catch(), so only genuinely buggy scripts trip it
  */
 class LxRuntime private constructor(
     private val appContext: Context,
@@ -24,6 +37,10 @@ class LxRuntime private constructor(
 ) {
 
     companion object {
+        init {
+            try { QuickJSLoader.init() } catch (_: Exception) { /* already loaded */ }
+        }
+
         private val scriptRuntimes = ConcurrentHashMap<String, LxRuntime>()
 
         fun get(appContext: Context, script: String): LxRuntime =
@@ -49,27 +66,25 @@ class LxRuntime private constructor(
          * evaluate() returns? The whole LX invoke chain depends on it.
          */
         fun diagnosePromises(): String {
-            val qjs = try { QuickJs.create() } catch (e: Exception) {
+            val ctx = try { QuickJSContext.create() } catch (e: Exception) {
                 return "QuickJS 创建失败：${e.message}"
             }
             return try {
-                qjs.evaluate(
+                // NOTE: this wrapper drains the microtask queue at the end of every
+                // evaluate(), so .then() has already run when evaluate() returns.
+                ctx.evaluate(
                     "globalThis.__diag = 'pending';" +
-                    "Promise.resolve(42).then(v => { globalThis.__diag = 'resolved:' + v; });" +
-                    "'sync';"
+                        "Promise.resolve(42).then(v => { globalThis.__diag = 'resolved:' + v; });" +
+                        "'sync';"
                 )
-                val afterFirst = qjs.evaluate("globalThis.__diag;")?.toString()
-                qjs.evaluate("'noop';")
-                val afterSecond = qjs.evaluate("globalThis.__diag;")?.toString()
-                qjs.evaluate(
-                    "(async () => { const v = await Promise.resolve(7); globalThis.__diagAsync = 'async:' + v; })();"
-                )
-                val afterAsync = qjs.evaluate("globalThis.__diagAsync;")?.toString()
-                "promise: $afterFirst -> $afterSecond | async/await: $afterAsync"
+                val afterFirst = ctx.evaluate("globalThis.__diag;")?.toString()
+                ctx.evaluate("(async () => { const v = await Promise.resolve(7); globalThis.__diagAsync = 'async:' + v; })();")
+                val afterAsync = ctx.evaluate("globalThis.__diagAsync;")?.toString()
+                "promise: $afterFirst | async/await: $afterAsync"
             } catch (e: Exception) {
                 "诊断异常：${e.message}"
             } finally {
-                try { qjs.close() } catch (_: Exception) {}
+                try { ctx.destroy() } catch (_: Exception) {}
             }
         }
     }
@@ -95,45 +110,49 @@ class LxRuntime private constructor(
     private val seq = AtomicInteger(0)
     private val invokeSeed = AtomicInteger(0)
     @Volatile private var bootstrapping = true
-    @Volatile private var quickJs: QuickJs? = null
+    @Volatile private var context: QuickJSContext? = null
+    @Volatile private var jsThread: Thread? = null
     @Volatile private var destroyed = false
 
-    /** bridge interface exposed to JS as globalThis.__hyBridge */
-    interface HyBridge {
-        fun post(message: String): String
+    init {
+        // create the JS context on its dedicated thread (the engine enforces thread affinity)
+        jsExecutor.submit {
+            jsThread = Thread.currentThread()
+            context = QuickJSContext.create()
+        }.get()
     }
 
-    private val hyBridge = object : HyBridge {
-        override fun post(message: String): String {
-            handleBridgeMessage(message)
-            return ""
-        }
+    /** Run [task] on the JS thread; inline if we're already on it. */
+    private fun <T> onJsThread(task: () -> T): T {
+        val t = jsThread
+        if (t != null && Thread.currentThread() === t) return task()
+        return jsExecutor.submit(Callable<T> { task() }).get()
     }
 
     /** Bootstraps the script; returns providers on success. Blocking (IO). */
     fun bootstrap(): Map<String, Provider> {
         if (providers.isNotEmpty()) return LinkedHashMap(providers)
-        val qjs = QuickJs.create()
-        quickJs = qjs
-        try {
-            qjs.set("__hyBridge", HyBridge::class.java, hyBridge)
-            qjs.evaluate(bridgeJs())
-            qjs.evaluate(script)
-            // pump the bootstrap window: script calls send('inited', {...}) synchronously
-            val deadline = System.currentTimeMillis() + 600
-            while (System.currentTimeMillis() < deadline && providers.isEmpty()) {
-                Thread.sleep(20)
-            }
+        onJsThread {
+            val ctx = context ?: throw IllegalStateException("JS context destroyed")
+            // inject the native bridge as globalThis.__hyBridge.post(jsonString)
+            val global = ctx.getGlobalObject()
+            val bridgeObj = ctx.createNewJSObject()
+            bridgeObj.setProperty("post", JSCallFunction { args ->
+                handleBridgeMessage(args.firstOrNull()?.toString().orEmpty())
+                ""
+            })
+            global.setProperty("__hyBridge", bridgeObj)
+            bridgeObj.release()
+            ctx.evaluate(bridgeJs())
+            ctx.evaluate(script)
             bootstrapping = false
             try {
-                qjs.evaluate("if (globalThis.__hyState) { globalThis.__hyState.bootstrapping = false; }")
+                ctx.evaluate("if (globalThis.__hyState) { globalThis.__hyState.bootstrapping = false; }")
             } catch (_: Exception) {}
-            return LinkedHashMap(providers)
-        } catch (e: Exception) {
-            try { qjs.close() } catch (_: Exception) {}
-            quickJs = null
-            throw e
         }
+        // lx.send('inited') fires synchronously during evaluate(script) via __hyBridge.post,
+        // so providers are populated by the time we get here
+        return LinkedHashMap(providers)
     }
 
     /**
@@ -169,7 +188,7 @@ class LxRuntime private constructor(
 
     /** Generic serialized invoke; result delivered as JSON string. */
     private fun invokeRequest(payload: JSONObject, timeoutMs: Long): String {
-        val qjs = quickJs ?: throw IllegalStateException("runtime not bootstrapped")
+        if (context == null) throw IllegalStateException("runtime not bootstrapped")
         val requestId = "invoke-${invokeSeed.incrementAndGet()}"
         val latch = java.util.concurrent.CountDownLatch(1)
         val box = arrayOfNulls<Result<String>>(1)
@@ -180,6 +199,7 @@ class LxRuntime private constructor(
         // run on the JS thread
         jsExecutor.execute {
             try {
+                val ctx = context ?: throw IllegalStateException("runtime destroyed")
                 val js = """
                     (() => {
                       const requestId = ${JSONObject.quote(requestId)};
@@ -195,12 +215,12 @@ class LxRuntime private constructor(
                       return true;
                     })()
                 """.trimIndent()
-                qjs.evaluate(js)
+                ctx.evaluate(js)
             } catch (e: Exception) {
                 pendingInvokes.remove(requestId)?.invoke(Result.failure(e))
             }
         }
-        if (!latch.await(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+        if (!latch.await(timeoutMs, TimeUnit.MILLISECONDS)) {
             pendingInvokes.remove(requestId)
             throw java.util.concurrent.TimeoutException("LX invoke timed out")
         }
@@ -262,12 +282,13 @@ class LxRuntime private constructor(
             val err = if (responseJson == null) "network error" else null
             jsExecutor.execute {
                 try {
+                    val ctx = context ?: return@execute
                     val js = if (err != null) {
                         "globalThis.__hyDeliverRequest(${JSONObject.quote(callbackId)}, ${JSONObject.quote(err)}, null);"
                     } else {
                         "globalThis.__hyDeliverRequest(${JSONObject.quote(callbackId)}, null, $responseJson);"
                     }
-                    quickJs?.evaluate(js)
+                    ctx.evaluate(js)
                 } catch (_: Exception) {}
             }
         }
@@ -315,10 +336,19 @@ class LxRuntime private constructor(
     fun destroy() {
         destroyed = true
         pendingInvokes.clear()
+        // context.destroy() must run on the JS thread
+        try {
+            if (Thread.currentThread() === jsThread) {
+                try { context?.destroy() } catch (_: Exception) {}
+            } else {
+                jsExecutor.submit {
+                    try { context?.destroy() } catch (_: Exception) {}
+                }.get(3, TimeUnit.SECONDS)
+            }
+        } catch (_: Exception) {}
+        context = null
         jsExecutor.shutdownNow()
         httpExecutor.shutdownNow()
-        try { quickJs?.close() } catch (_: Exception) {}
-        quickJs = null
     }
 
     // ---------------- JS bridge source (ported from Vanta) ----------------
