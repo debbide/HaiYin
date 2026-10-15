@@ -200,12 +200,47 @@ object Player {
             DlnaTrace.log("resume: result ok=$ok")
             if (ok) {
                 _state.value = _state.value.copy(playing = true, prepared = true, error = null)
+                appContext?.let { try { PlaybackService.refresh(it) } catch (_: Exception) {} }
+                // The renderer CLAIMED playing — make sure it isn't lying. Some
+                // renderers report PLAYING while the stream is stalled (silent).
+                // On a frozen position, re-push transparently instead of making
+                // the user tap play a second time.
+                if (!verifyPlaybackAdvancing(dev)) {
+                    _state.value = _state.value.copy(playing = false)
+                    appContext?.let { try { PlaybackService.refresh(it) } catch (_: Exception) {} }
+                }
             }
             // on failure repushCast already set state.error with the real reason
             appContext?.let { try { PlaybackService.refresh(it) } catch (_: Exception) {} }
         } finally {
             castBusy = false
         }
+    }
+
+    /**
+     * Returns true when the renderer's position actually advances within 3s of
+     * a PLAYING claim. On a frozen position (stalled/silent stream) does a full
+     * re-push and returns its result. Runs on castExecutor with castBusy held.
+     */
+    private fun verifyPlaybackAdvancing(dev: Dlna.Device): Boolean {
+        val st = _state.value
+        // too close to the end to tell: the track may legitimately finish mid-check
+        if (st.durationMs > 10_000 && st.positionMs >= st.durationMs - 8000) {
+            DlnaTrace.log("resume: near track end, skipping position verify")
+            return true
+        }
+        val p1 = try { Dlna.positionMs(dev) } catch (_: Exception) { null }
+        try { Thread.sleep(3000) } catch (_: InterruptedException) { return false }
+        if (castDevice !== dev) return false
+        val p2 = try { Dlna.positionMs(dev) } catch (_: Exception) { null }
+        DlnaTrace.log("resume: verify position ${p1 ?: "?"} -> ${p2 ?: "?"}")
+        if (p1 == null || p2 == null) {
+            DlnaTrace.log("resume: position unreadable, trusting PLAYING")
+            return true
+        }
+        if (p2 > p1) return true
+        DlnaTrace.log("resume: position FROZEN, re-pushing")
+        return repushCast(dev)
     }
 
     /**
