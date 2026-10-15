@@ -690,14 +690,18 @@ object Player {
                             }
 
                             if (nextIdx in st.queue.indices) {
+                                DlnaTrace.log("poller: end ($stateStr), advancing ${st.index} -> $nextIdx")
                                 _state.value = st.copy(index = nextIdx, playing = true, prepared = true, positionMs = 0)
                                 appContext?.let { try { PlaybackService.refresh(it) } catch (_: Exception) {} }
                                 castPushNow()
                             } else {
+                                DlnaTrace.log("poller: end ($stateStr), queue exhausted, stopping")
                                 _state.value = _state.value.copy(playing = false, prepared = false)
                                 castStop()
                             }
                             return
+                        } else {
+                            DlnaTrace.log("poller: $stateStr but pos=${st.positionMs}/${st.durationMs} not near end, ignoring")
                         }
                     }
 
