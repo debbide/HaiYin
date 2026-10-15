@@ -91,7 +91,7 @@ class MainActivity : ComponentActivity() {
     @OptIn(ExperimentalFoundationApi::class)
     @Composable
     fun HaiYinApp() {
-        var tab by remember { mutableStateOf(0) }   // 0: 发现/搜索, 1: 收藏, 2: 导歌单, 3: 音源脚本
+        var screen by remember { mutableStateOf("search") }   // search / favorites / settings / scripts / import
         var query by remember { mutableStateOf("") }
         var resultsBySource by remember { mutableStateOf(mapOf<String, List<Sources.Song>>()) }
         var sourceTab by remember { mutableStateOf("tx") }   // tx QQ音乐 / wy 网易云 / kw 酷我 / kg 酷狗
@@ -146,7 +146,7 @@ class MainActivity : ComponentActivity() {
             if (query.isNotBlank() && !searching) {
                 searching = true
                 status = "正在多源检索中…"
-                tab = 0
+                screen = "search"
                 scope.launch {
                     val map = withContext(Dispatchers.IO) {
                         try { Sources.searchAllBySource(query.trim()) } catch (_: Exception) { emptyMap() }
@@ -166,34 +166,65 @@ class MainActivity : ComponentActivity() {
                 .systemBarsPadding()
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
-                // 1. Top Header Bar (Title, Version, Quality Chips)
+                // 1. Top Header Bar
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 20.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("海音", fontSize = 26.sp, fontWeight = FontWeight.Black, color = D.accent)
-                    Box(
-                        modifier = Modifier
-                            .padding(start = 8.dp)
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(D.surfaceBorder)
-                            .combinedClickable(
-                                onClick = {},
-                                onLongClick = { showCrashLog = !showCrashLog }
-                            )
-                            .padding(horizontal = 6.dp, vertical = 2.dp)
-                    ) {
+                    if (screen != "search") {
+                        IconButton(
+                            onClick = { screen = if (screen == "scripts" || screen == "import") "settings" else "search" },
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Icon(Icons.Rounded.ArrowBack, "返回", tint = D.textPrimary, modifier = Modifier.size(22.dp))
+                        }
+                        Spacer(Modifier.width(4.dp))
                         Text(
-                            "v" + BuildConfig.VERSION_NAME,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = D.textDim
+                            when (screen) {
+                                "favorites" -> "收藏"
+                                "settings" -> "设置"
+                                "scripts" -> "音源脚本"
+                                "import" -> "导入歌单"
+                                else -> ""
+                            },
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = D.textPrimary
                         )
+                    } else {
+                        Text("海音", fontSize = 26.sp, fontWeight = FontWeight.Black, color = D.accent)
+                        Box(
+                            modifier = Modifier
+                                .padding(start = 8.dp)
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(D.surfaceBorder)
+                                .combinedClickable(
+                                    onClick = {},
+                                    onLongClick = { showCrashLog = !showCrashLog }
+                                )
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                        ) {
+                            Text(
+                                "v" + BuildConfig.VERSION_NAME,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = D.textDim
+                            )
+                        }
                     }
 
                     Spacer(Modifier.weight(1f))
+
+                    if (screen == "search") {
+                        IconButton(onClick = { screen = "favorites" }, modifier = Modifier.size(36.dp)) {
+                            Icon(Icons.Rounded.FavoriteBorder, "收藏", tint = D.textDim, modifier = Modifier.size(22.dp))
+                        }
+                        IconButton(onClick = { screen = "settings" }, modifier = Modifier.size(36.dp)) {
+                            Icon(Icons.Rounded.Settings, "设置", tint = D.textDim, modifier = Modifier.size(22.dp))
+                        }
+                    }
                 }
 
                 // Crash Log Debug Card (Long-press version to toggle)
@@ -237,8 +268,8 @@ class MainActivity : ComponentActivity() {
                         .fillMaxWidth()
                         .weight(1f)
                 ) {
-                    when (tab) {
-                        0 -> SearchTabContent(
+                    when (screen) {
+                        "search" -> SearchTabContent(
                             query = query,
                             onQueryChange = { query = it },
                             onSearch = { doSearch() },
@@ -254,7 +285,7 @@ class MainActivity : ComponentActivity() {
                                 ensureService()
                             }
                         )
-                        1 -> FavoritesTabContent(
+                        "favorites" -> FavoritesTabContent(
                             favVersion = favVersion,
                             playerState = playerState,
                             onPlayQueue = { list, idx ->
@@ -262,7 +293,7 @@ class MainActivity : ComponentActivity() {
                                 ensureService()
                             }
                         )
-                        2 -> ImportTabContent(
+                        "import" -> ImportTabContent(
                             importText = importText,
                             onImportTextChange = { importText = it },
                             importing = importing,
@@ -278,7 +309,7 @@ class MainActivity : ComponentActivity() {
                                         if (songs.isNotEmpty()) {
                                             resultsBySource = mapOf("wy" to songs)
                                             sourceTab = "wy"
-                                            tab = 0
+                                            screen = "search"
                                             status = "歌单已导入：${songs.size} 首歌曲 · 点击即播"
                                         } else {
                                             status = "导入失败：链接无效或网易云接口无响应"
@@ -287,7 +318,12 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                         )
-                        3 -> SourceScriptsTabContent(
+                        "settings" -> SettingsScreen(
+                            scriptsVersion = scriptsVersion,
+                            onOpenScripts = { screen = "scripts" },
+                            onOpenImport = { screen = "import" },
+                        )
+                        "scripts" -> SourceScriptsTabContent(
                             importText = importText,
                             onImportTextChange = { importText = it },
                             importing = importing,
@@ -338,14 +374,6 @@ class MainActivity : ComponentActivity() {
                         onExpand = { showFullPlayer = true }
                     )
                 }
-
-                // 4. Floating Modern Bottom Navigation Bar
-                val favCount = remember(favVersion) { Favorites.all.size }
-                ModernBottomNav(
-                    currentTab = tab,
-                    onSelectTab = { tab = it },
-                    favCount = favCount
-                )
             }
         }
 
@@ -828,6 +856,64 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    // ==================== Screen: Settings ====================
+
+    @Composable
+    private fun SettingsScreen(
+        scriptsVersion: Int,
+        onOpenScripts: () -> Unit,
+        onOpenImport: () -> Unit,
+    ) {
+        val bundleCount = remember(scriptsVersion) { SourceScripts.bundles().size }
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 16.dp, vertical = 8.dp)
+        ) {
+            SettingsRow(
+                icon = Icons.Rounded.Extension,
+                title = "音源脚本",
+                subtitle = if (bundleCount > 0) "已安装 $bundleCount 个脚本" else "导入 LX 音源脚本",
+                onClick = onOpenScripts
+            )
+            Spacer(Modifier.height(10.dp))
+            SettingsRow(
+                icon = Icons.Rounded.CloudDownload,
+                title = "导入歌单",
+                subtitle = "从网易云分享链接导入",
+                onClick = onOpenImport
+            )
+        }
+    }
+
+    @Composable
+    private fun SettingsRow(
+        icon: ImageVector,
+        title: String,
+        subtitle: String,
+        onClick: () -> Unit,
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(14.dp))
+                .background(D.surface)
+                .border(1.dp, D.surfaceBorder, RoundedCornerShape(14.dp))
+                .clickable(onClick = onClick)
+                .padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(icon, contentDescription = null, tint = D.accent, modifier = Modifier.size(22.dp))
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(title, fontSize = 15.sp, fontWeight = FontWeight.Medium, color = D.textPrimary)
+                Spacer(Modifier.height(2.dp))
+                Text(subtitle, fontSize = 12.sp, color = D.textDim)
+            }
+            Icon(Icons.Rounded.ChevronRight, contentDescription = null, tint = D.textFaint, modifier = Modifier.size(20.dp))
+        }
+    }
+
     // ==================== Component: Modern Song Card ====================
 
     @Composable
@@ -1119,79 +1205,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // ==================== Component: Modern Bottom Navigation Bar ====================
-
-    @Composable
-    fun ModernBottomNav(
-        currentTab: Int,
-        onSelectTab: (Int) -> Unit,
-        favCount: Int,
-    ) {
-        val navItems = listOf(
-            Triple(0, "发现", Icons.Rounded.Search),
-            Triple(1, "收藏", Icons.Rounded.Favorite),
-            Triple(2, "导歌单", Icons.Rounded.CloudDownload),
-            Triple(3, "音源", Icons.Rounded.Extension),
-        )
-
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 6.dp)
-                .clip(RoundedCornerShape(22.dp))
-                .background(D.surface.copy(alpha = 0.95f))
-                .border(1.dp, D.surfaceBorder, RoundedCornerShape(22.dp))
-                .padding(vertical = 4.dp, horizontal = 6.dp),
-            horizontalArrangement = Arrangement.SpaceAround,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            navItems.forEach { (index, label, icon) ->
-                val selected = currentTab == index
-                val itemBg = if (selected) D.accent.copy(alpha = 0.16f) else Color.Transparent
-
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(itemBg)
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = rememberRipple(color = D.accent),
-                            onClick = { onSelectTab(index) }
-                        )
-                        .padding(horizontal = 14.dp, vertical = 8.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        BadgedBox(
-                            badge = {
-                                if (index == 1 && favCount > 0) {
-                                    Badge(containerColor = D.accent, contentColor = D.bg) {
-                                        Text("$favCount", fontSize = 9.sp)
-                                    }
-                                }
-                            }
-                        ) {
-                            Icon(
-                                icon,
-                                contentDescription = label,
-                                tint = if (selected) D.accent else D.textDim,
-                                modifier = Modifier.size(20.dp)
-                            )
-                        }
-                        if (selected) {
-                            Spacer(Modifier.width(6.dp))
-                            Text(
-                                label,
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = D.accent
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
 
     private fun ensureService() {
         val intent = Intent(this, PlaybackService::class.java).apply { action = PlaybackService.ACTION_START }
