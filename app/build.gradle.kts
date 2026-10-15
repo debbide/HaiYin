@@ -3,6 +3,19 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+// Release signing: create keystore.properties at the project root (gitignored):
+//   storeFile=E:/keystore/haiyin-release.keystore
+//   storePassword=xxxx
+//   keyAlias=haiyin
+//   keyPassword=xxxx
+// Generate the keystore once with:
+//   keytool -genkeypair -v -keystore E:/keystore/haiyin-release.keystore \
+//     -alias haiyin -keyalg RSA -keysize 2048 -validity 9125
+// Back it up somewhere safe: losing it means the app can never be updated.
+val keystoreProps = java.util.Properties()
+val keystorePropsFile = rootProject.file("keystore.properties")
+if (keystorePropsFile.exists()) keystoreProps.load(keystorePropsFile.inputStream())
+
 android {
     namespace = "com.haiyin.player"
     compileSdk = 34
@@ -15,10 +28,25 @@ android {
         versionName = "0.9.1"
     }
 
+    signingConfigs {
+        if (keystorePropsFile.exists()) {
+            create("release") {
+                storeFile = file(keystoreProps.getProperty("storeFile"))
+                storePassword = keystoreProps.getProperty("storePassword")
+                keyAlias = keystoreProps.getProperty("keyAlias")
+                keyPassword = keystoreProps.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("debug")
+            // Formal release signing comes from keystore.properties at the project
+            // root (gitignored, never commit it). Without it, release falls back
+            // to the debug key for local testing only.
+            signingConfig = if (keystorePropsFile.exists()) signingConfigs.getByName("release")
+            else signingConfigs.getByName("debug")
         }
     }
     compileOptions {
