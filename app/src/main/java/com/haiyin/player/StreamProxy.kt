@@ -95,6 +95,10 @@ object StreamProxy {
                 out.write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".toByteArray())
                 out.flush(); client.close(); return
             }
+            // diagnostic: a second GET for the same id means the renderer
+            // re-pulled the stream (e.g. looping at end) without any AVTransport
+            // state change the app could see
+            DlnaTrace.log("proxy: GET $id range=${reqHeaders["range"] ?: "-"}")
 
             val conn = URL(target.url).openConnection() as HttpURLConnection
             conn.connectTimeout = 10000
