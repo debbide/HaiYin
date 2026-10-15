@@ -52,7 +52,7 @@ class PlaybackService : Service() {
             val style = androidx.media.app.NotificationCompat.MediaStyle()
             mediaSession?.let { style.setMediaSession(it.sessionToken) }
             val builder = androidx.core.app.NotificationCompat.Builder(context, CHANNEL_ID)
-                .setSmallIcon(android.R.drawable.ic_media_play)
+                .setSmallIcon(R.mipmap.ic_launcher)
                 .setOngoing(true)
                 .setVisibility(androidx.core.app.NotificationCompat.VISIBILITY_PUBLIC)
                 .addAction(android.R.drawable.ic_media_previous, "上一曲", pi(context, ACTION_PREV))
