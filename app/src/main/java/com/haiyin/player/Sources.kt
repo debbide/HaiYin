@@ -1,22 +1,21 @@
 package com.haiyin.player
 
-import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Native music source resolver — the same public/observed endpoints that the
- * lx-protocol "非常刀" script uses, verified alive 2026-10-14:
- *  - kuwo search + url:  oiapi.net/api/Kuwo        (search returns rid; url direct)
- *  - netease url:        oiapi.net/api/Music_163   (id -> url, flaky)
- *  - kuwo template:      musicapi.haitangw.net/music/kw.php (302 -> direct ogg/mp3)
- *  - qishui search:      api-vehicle.volcengine.com/v2/search/type
- *  - qishui track:       api.qishui.com/luna/h5/track (needs app sign headers; may 403)
+ * Track metadata search + playback URL resolution.
+ *
+ * Architecture (mirrors desktop Vanta):
+ *  - SEARCH is built-in but metadata-only: public NetEase/QQ APIs return
+ *    track info + artwork, never playable URLs. This is not a "source".
+ *  - RESOLUTION has no built-in path: playable URLs come ONLY from
+ *    user-imported LX scripts (see SourceScripts).
  */
 object Sources {
 
     data class Song(
         val id: String,
-        val source: String,   // kw / wy / qs / mg
+        val source: String,   // wy / tx  (LX provider codes)
         val name: String,
         val singer: String,
         val album: String,
@@ -24,123 +23,119 @@ object Sources {
         val img: String,
     )
 
-    private const val UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+    // ---------- metadata search (built-in, no playback URLs) ----------
 
-    // ---------- search ----------
-
-    fun searchKuwo(keyword: String, page: Int = 1): List<Song> {
-        val url = "https://oiapi.net/api/Kuwo?msg=${enc(keyword)}&n=$page&br=5"
-        val body = Http.get(url) ?: return emptyList()
-        val root = JSONObject(body)
-        val d = root.optJSONObject("data") ?: return emptyList()
-        val rid = d.optString("rid", "")
-        return listOf(
-            Song(
-                id = rid.removePrefix("MUSIC_"),
-                source = "kw",
-                name = d.optString("song", ""),
-                singer = d.optString("singer", ""),
-                album = d.optString("album", ""),
-                interval = d.optString("time", ""),
-                img = d.optString("picture", ""),
-            )
-        )
-    }
-
-    fun searchQishui(keyword: String, limit: Int = 30): List<Song> {
-        val url = "https://api-vehicle.volcengine.com/v2/search/type?keyword=${enc(keyword)}&search_type=music&limit=$limit&real_offset=0&search_source=qishui"
-        val body = Http.get(url) ?: return emptyList()
-        val list = JSONObject(body).optJSONObject("data")?.optJSONArray("list") ?: return emptyList()
-        val out = ArrayList<Song>(list.length())
-        for (i in 0 until list.length()) {
-            val s = list.getJSONObject(i)
+    fun searchNetease(keyword: String, limit: Int = 20): List<Song> {
+        val q = enc(keyword)
+        val body = Http.get(
+            "https://music.163.com/api/search/get?s=$q&type=1&limit=$limit",
+            headers = mapOf("Referer" to "https://music.163.com/")
+        ) ?: return emptyList()
+        val songs = JSONObject(body).optJSONObject("result")?.optJSONArray("songs")
+            ?: return emptyList()
+        val out = ArrayList<Song>(songs.length())
+        for (i in 0 until songs.length()) {
+            val s = songs.optJSONObject(i) ?: continue
+            val id = s.optLong("id", 0)
+            if (id <= 0) continue
+            val artists = s.optJSONArray("artists")
+            val singer = if (artists != null) {
+                List(artists.length()) { artists.optJSONObject(it)?.optString("name", "") ?: "" }
+                    .filter { it.isNotEmpty() }.joinToString("/")
+            } else ""
+            val album = s.optJSONObject("album")
             out.add(
                 Song(
-                    id = s.optString("item_id", ""),
-                    source = "qs",
-                    name = s.optString("title", ""),
-                    singer = s.optJSONObject("author_info")?.optString("name", "") ?: "",
-                    album = "",
-                    interval = fmtDuration(s.optLong("duration", 0)),
-                    img = s.optString("cover_url", ""),
+                    id = id.toString(),
+                    source = "wy",
+                    name = s.optString("name", ""),
+                    singer = singer,
+                    album = album?.optString("name", "") ?: "",
+                    interval = fmtDurationMs(s.optLong("duration", 0)),
+                    img = album?.optString("picUrl", "") ?: "",
                 )
             )
         }
         return out
     }
 
-    /** aggregate search across all working sources */
+    fun searchQQ(keyword: String, limit: Int = 20): List<Song> {
+        val payload = JSONObject().apply {
+            put("req_1", JSONObject().apply {
+                put("method", "DoSearchForQQMusicDesktop")
+                put("module", "music.search.SearchCgiService")
+                put("param", JSONObject().apply {
+                    put("num_per_page", limit)
+                    put("page_num", 1)
+                    put("query", keyword)
+                    put("search_type", 0)
+                })
+            })
+        }.toString()
+        val body = Http.post(
+            "https://u.y.qq.com/cgi-bin/musicu.fcg",
+            payload,
+            headers = mapOf(
+                "Referer" to "https://y.qq.com/",
+                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            )
+        ) ?: return emptyList()
+        val list = JSONObject(body).optJSONObject("req_1")?.optJSONObject("data")
+            ?.optJSONObject("body")?.optJSONObject("song")?.optJSONArray("list")
+            ?: return emptyList()
+        val out = ArrayList<Song>(list.length())
+        for (i in 0 until list.length()) {
+            val s = list.optJSONObject(i) ?: continue
+            val mid = s.optString("mid", "")
+            if (mid.isEmpty()) continue
+            val singers = s.optJSONArray("singer")
+            val singer = if (singers != null) {
+                List(singers.length()) { singers.optJSONObject(it)?.optString("name", "") ?: "" }
+                    .filter { it.isNotEmpty() }.joinToString("/")
+            } else ""
+            val album = s.optJSONObject("album")
+            val albumMid = album?.optString("mid", "") ?: ""
+            out.add(
+                Song(
+                    id = mid,
+                    source = "tx",
+                    name = s.optString("title", "").ifEmpty { s.optString("name", "") },
+                    singer = singer,
+                    album = album?.optString("name", "") ?: "",
+                    interval = fmtDuration(s.optLong("interval", 0)),
+                    img = if (albumMid.isNotEmpty())
+                        "https://y.gtimg.cn/music/photo_new/T002R500x500M000${albumMid}.jpg"
+                    else "",
+                )
+            )
+        }
+        return out
+    }
+
+    /** aggregate metadata search across built-in public providers */
     fun searchAll(keyword: String): List<Song> {
         val results = ArrayList<Song>()
-        // qishui first (rich results), then kuwo pages
-        try { results.addAll(searchQishui(keyword, 20)) } catch (e: Exception) { }
-        try { results.addAll(searchKuwo(keyword, 1)) } catch (e: Exception) { }
-        try { results.addAll(searchKuwo(keyword, 2)) } catch (e: Exception) { }
+        try { results.addAll(searchNetease(keyword)) } catch (_: Exception) {}
+        try { results.addAll(searchQQ(keyword)) } catch (_: Exception) {}
         return results
     }
 
-    // ---------- url resolve ----------
+    // ---------- playback URL resolution: user-imported scripts only ----------
 
     /**
-     * Resolve a playable direct URL. Falls back across providers,
-     * then through user-imported lx scripts for any platform.
+     * Resolve a playable URL. ONLY user-imported LX scripts are consulted —
+     * there is deliberately no built-in fallback. Returns null when the user
+     * hasn't imported a script covering [song.source], or all fail.
      */
     fun resolveUrl(song: Song, quality: String = "320k"): String? {
-        // 1. lx script sources first for platforms native chain can't reach (tx/kg/mg...)
-        try {
-            SourceScripts.resolveViaScripts(song.source, song, quality)?.let { return it }
-        } catch (_: Exception) {}
-        // 1. haitangw kuwo template (works for kw ids, 302 -> direct)
-        if (song.source == "kw") {
-            val level = if (quality == "flac") "lossless" else if (quality == "128k") "standard" else "exhigh"
-            val u = "https://musicapi.haitangw.net/music/kw.php?type=mp3&id=${song.id}&level=$level"
-            Http.get(u, followRedirects = true)?.let { body ->
-                extractUrl(body)?.let { return it }
-            }
+        return try {
+            SourceScripts.resolveMusicUrl(song.source, song, quality)
+        } catch (_: Exception) {
+            null
         }
-        // 2. oiapi kuwo search-based resolve (most reliable today)
-        try {
-            val kw = searchKuwoExact(song)
-            if (kw != null) {
-                val url = "https://oiapi.net/api/Kuwo?msg=${enc(kw)}&n=1&br=${brFor(quality)}"
-                val body = Http.get(url)
-                if (body != null) {
-                    extractUrl(JSONObject(body).optJSONObject("data")?.optString("url", null))?.let { return it }
-                }
-            }
-        } catch (_: Exception) { }
-        // 3. netease by id
-        if (song.source == "wy") {
-            val body = Http.get("https://oiapi.net/api/Music_163?id=${song.id}")
-            if (body != null) {
-                val data = JSONObject(body).optJSONArray("data")
-                val obj = if (data != null && data.length() > 0) data.getJSONObject(0) else JSONObject(body).optJSONObject("data")
-                extractUrl(obj?.optString("url", null))?.let { return it }
-            }
-        }
-        return null
     }
 
-    private fun searchKuwoExact(song: Song): String? {
-        val kw = "${song.name} ${song.singer}".trim()
-        return kw.ifEmpty { null }
-    }
-
-    private fun brFor(quality: String): Int = when (quality) {
-        "flac" -> 1
-        "320k" -> 5
-        else -> 7
-    }
-
-    private fun extractUrl(raw: String?): String? {
-        if (raw == null) return null
-        if (raw.startsWith("http")) return raw
-        // pull first http url from a text blob
-        val m = Regex("""https?://[^\s"'<>]+""").find(raw) ?: return null
-        return m.value
-    }
-
-    // ---------- playlist import (netease share links) ----------
+    // ---------- playlist import (netease share links, metadata only) ----------
 
     /**
      * Parse a netease playlist id from a share link like
@@ -177,18 +172,17 @@ object Sources {
         return out
     }
 
+    // ---------- helpers ----------
+
+    private fun enc(s: String) = java.net.URLEncoder.encode(s, "UTF-8")
+
     private fun fmtDurationMs(ms: Long): String {
         val s = ms / 1000
         return "%d:%02d".format(s / 60, s % 60)
     }
 
-    // ---------- helpers ----------
-
-    private fun enc(s: String) = java.net.URLEncoder.encode(s, "UTF-8")
-
     private fun fmtDuration(sec: Long): String {
         if (sec <= 0) return "--:--"
-        // qishui returns ms sometimes
         val s = if (sec > 10000) sec / 1000 else sec
         return "%02d:%02d".format(s / 60, s % 60)
     }

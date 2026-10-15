@@ -113,6 +113,21 @@ class LxRuntime private constructor(
         return url
     }
 
+    /**
+     * Invoke the script's lyric handler for [providerId].
+     * Returns the raw JSON string (caller extracts the lyric text), or throws.
+     */
+    fun resolveLyrics(providerId: String, musicInfoJson: String, timeoutMs: Long = 12_000): String {
+        val payload = JSONObject().apply {
+            put("action", "lyric")
+            put("source", providerId)
+            put("info", JSONObject().put("musicInfo", JSONObject(musicInfoJson)))
+        }
+        val result = invokeRequest(payload, timeoutMs)
+        if (result.isBlank() || result == "null") throw IllegalStateException("LX script returned no lyrics")
+        return result
+    }
+
     /** Generic serialized invoke; result delivered as JSON string. */
     private fun invokeRequest(payload: JSONObject, timeoutMs: Long): String {
         val qjs = quickJs ?: throw IllegalStateException("runtime not bootstrapped")

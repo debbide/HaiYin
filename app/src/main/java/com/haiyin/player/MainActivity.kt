@@ -58,6 +58,8 @@ class MainActivity : ComponentActivity() {
         Player.init(applicationContext)
         Favorites.init(applicationContext)
         SourceScripts.init(applicationContext)
+        Lyrics.init(applicationContext)
+        CoverLoader.init(applicationContext)
         requestNotifPermissionIfNeeded()
         setContent {
             MaterialTheme(
@@ -98,6 +100,7 @@ class MainActivity : ComponentActivity() {
         val favVersion by Favorites.version.collectAsState()
         var importText by remember { mutableStateOf("") }
         var importing by remember { mutableStateOf(false) }
+        var scriptsVersion by remember { mutableStateOf(0) }
         val playerState by Player.state.collectAsState()
         val scope = rememberCoroutineScope()
 
@@ -260,25 +263,26 @@ class MainActivity : ComponentActivity() {
                             importText = importText,
                             onImportTextChange = { importText = it },
                             importing = importing,
+                            scriptsVersion = scriptsVersion,
+                            onScriptsChanged = { scriptsVersion++ },
                             onImportSubmit = {
                                 if (importText.isNotBlank() && !importing) {
                                     importing = true
                                     scope.launch {
-                                        val content = withContext(Dispatchers.IO) {
-                                            val t = importText.trim()
-                                            if (t.startsWith("http")) Http.get(t, timeoutMs = 15000) else t
+                                        val result = withContext(Dispatchers.IO) {
+                                            try {
+                                                val t = importText.trim()
+                                                if (t.startsWith("http")) SourceScripts.importFromUrl(t)
+                                                else SourceScripts.importFromText(t)
+                                            } catch (e: Exception) {
+                                                null
+                                            }
                                         }
                                         importing = false
-                                        if (content != null && content.contains("lx") && content.length > 100) {
-                                            val name = Regex("""@name\s+(.+)""").find(content)
-                                                ?.groupValues?.get(1)?.trim()?.take(20)
-                                                ?: "音源_${System.currentTimeMillis() % 10000}"
-                                            withContext(Dispatchers.IO) {
-                                                SourceScripts.add(name, content)
-                                                SourceScripts.bootstrapAll()
-                                            }
+                                        if (result != null && result.providerNames.isNotEmpty()) {
                                             importText = ""
-                                            status = "LX 音源脚本已激活！"
+                                            status = result.message
+                                            scriptsVersion++
                                         } else {
                                             status = "导入失败：非有效的 LX 协议脚本"
                                         }
@@ -553,10 +557,11 @@ class MainActivity : ComponentActivity() {
         importText: String,
         onImportTextChange: (String) -> Unit,
         importing: Boolean,
+        scriptsVersion: Int,
+        onScriptsChanged: () -> Unit,
         onImportSubmit: () -> Unit,
     ) {
-        var scriptsBump by remember { mutableStateOf(0) }
-        val scriptList = remember(scriptsBump) { SourceScripts.list() }
+        val scriptList = remember(scriptsVersion) { SourceScripts.list() }
         val scope = rememberCoroutineScope()
 
         Column(
@@ -567,7 +572,7 @@ class MainActivity : ComponentActivity() {
             Text("落雪 (LX) 音源扩展", fontSize = 17.sp, fontWeight = FontWeight.Bold, color = D.textPrimary)
             Spacer(Modifier.height(6.dp))
             Text(
-                "海音内置 QuickJS 引擎。支持粘贴或直接填入 lx-music 协议音源脚本（.js 脚本链接或代码），可无缝扩展 QQ、酷狗、咪咕等音源解析。",
+                "海音内置 QuickJS 引擎。粘贴 .js 脚本链接或代码导入，点播时自动匹配对应平台线路，无需手动绑定。",
                 fontSize = 13.sp, color = D.textDim, lineHeight = 18.sp
             )
             Spacer(Modifier.height(14.dp))
@@ -606,7 +611,7 @@ class MainActivity : ComponentActivity() {
             }
 
             Spacer(Modifier.height(18.dp))
-            Text("已安装的音源脚本 (${scriptList.size})", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = D.textPrimary)
+            Text("已安装的音源线路 (${scriptList.size})", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = D.textPrimary)
             Spacer(Modifier.height(8.dp))
 
             if (scriptList.isEmpty()) {
@@ -616,12 +621,12 @@ class MainActivity : ComponentActivity() {
                         .padding(vertical = 30.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text("暂未添加第三方脚本音源，当前使用内置默认解析", color = D.textFaint, fontSize = 12.sp)
+                    Text("还没有导入音源脚本，导入后即可解析播放", color = D.textFaint, fontSize = 12.sp)
                 }
             } else {
                 LazyColumn(modifier = Modifier.fillMaxWidth()) {
                     items(scriptList.size) { i ->
-                        val (id, _, provCount) = scriptList[i]
+                        val entry = scriptList[i]
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -633,14 +638,33 @@ class MainActivity : ComponentActivity() {
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Column(Modifier.weight(1f)) {
-                                Text(id, color = D.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+                                Text(entry.name, color = D.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1)
                                 Spacer(Modifier.height(2.dp))
                                 Text(
-                                    if (provCount > 0) "$provCount 个平台已就绪" else "等待加载",
+                                    buildString {
+                                        append(entry.providerName)
+                                        if (entry.version.isNotBlank()) append(" · ${entry.version}")
+                                        if (entry.author.isNotBlank()) append(" · ${entry.author}")
+                                    },
                                     fontSize = 11.sp,
-                                    color = if (provCount > 0) D.accent else D.textFaint
+                                    color = if (entry.enabled) D.accent else D.textFaint
                                 )
                             }
+                            Switch(
+                                checked = entry.enabled,
+                                onCheckedChange = { checked ->
+                                    scope.launch {
+                                        withContext(Dispatchers.IO) { SourceScripts.setEnabled(entry.id, checked) }
+                                        onScriptsChanged()
+                                    }
+                                },
+                                colors = SwitchDefaults.colors(
+                                    checkedThumbColor = D.accent,
+                                    checkedTrackColor = D.accent.copy(alpha = 0.4f),
+                                    uncheckedThumbColor = D.textFaint,
+                                    uncheckedTrackColor = D.surfaceVar,
+                                )
+                            )
                             Text(
                                 "卸载",
                                 color = D.fav,
@@ -650,8 +674,8 @@ class MainActivity : ComponentActivity() {
                                     .clip(RoundedCornerShape(6.dp))
                                     .clickable {
                                         scope.launch {
-                                            withContext(Dispatchers.IO) { SourceScripts.remove(id) }
-                                            scriptsBump++
+                                            withContext(Dispatchers.IO) { SourceScripts.remove(entry.id) }
+                                            onScriptsChanged()
                                         }
                                     }
                                     .padding(8.dp)

@@ -53,6 +53,42 @@ object Http {
         }
     }
 
+    /** Sync HTTP POST with JSON body; runs on caller's IO thread. */
+    fun post(
+        url: String,
+        jsonBody: String,
+        timeoutMs: Int = 8000,
+        headers: Map<String, String> = emptyMap(),
+    ): String? {
+        lastUrl = url
+        return try {
+            val conn = URL(url).openConnection() as HttpURLConnection
+            conn.connectTimeout = timeoutMs
+            conn.readTimeout = timeoutMs
+            conn.requestMethod = "POST"
+            conn.doOutput = true
+            conn.setRequestProperty(
+                "User-Agent",
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+            )
+            conn.setRequestProperty("Content-Type", "application/json")
+            for ((k, v) in headers) conn.setRequestProperty(k, v)
+            conn.outputStream.bufferedWriter(Charsets.UTF_8).use { it.write(jsonBody) }
+            val code = conn.responseCode
+            if (code != 200) {
+                conn.disconnect()
+                return null
+            }
+            val body = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            conn.disconnect()
+            body
+        } catch (e: IOException) {
+            null
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     /** Follow redirects manually and return the FINAL direct URL (for media playback). */
     fun resolveRedirect(url: String, timeoutMs: Int = 8000): String? {
         return try {
