@@ -160,12 +160,96 @@ object Sources {
         }
     }
 
-    /** aggregate metadata search across built-in public providers */
-    fun searchAll(keyword: String): List<Song> {
-        val results = ArrayList<Song>()
-        try { results.addAll(searchNetease(keyword)) } catch (_: Exception) {}
-        try { results.addAll(searchQQ(keyword)) } catch (_: Exception) {}
-        return results
+    /** Kuwo metadata search (public endpoint, mirrors desktop vanta). */
+    fun searchKuwo(keyword: String, limit: Int = 20): List<Song> {
+        val q = enc(keyword)
+        val body = Http.get(
+            "https://search.kuwo.cn/r.s?client=kt&all=$q&pn=0&rn=$limit&uid=794762570" +
+                "&ver=kwplayer_ar_9.2.2.1&vipver=1&show_copyright_off=1&newver=1&ft=music" +
+                "&cluster=0&strategy=2012&encoding=utf8&rformat=json&vermerge=1&mobi=1&issubtitle=1",
+            headers = mapOf("Referer" to "https://www.kuwo.cn/")
+        ) ?: return emptyList()
+        val arr = try { JSONObject(body).optJSONArray("abslist") } catch (_: Exception) { null }
+            ?: return emptyList()
+        val out = ArrayList<Song>(arr.length())
+        for (i in 0 until arr.length()) {
+            val s = arr.optJSONObject(i) ?: continue
+            val rid = s.optString("MUSICRID", "").removePrefix("MUSIC_")
+            if (rid.isEmpty()) continue
+            val art = s.optString("web_albumpic_short", "").ifEmpty { s.optString("pic", "") }
+            out.add(
+                Song(
+                    id = rid,
+                    source = "kw",
+                    name = s.optString("SONGNAME", ""),
+                    singer = s.optString("ARTIST", ""),
+                    album = s.optString("ALBUM", ""),
+                    interval = fmtDuration(durationSeconds(s.opt("DURATION"))),
+                    img = when {
+                        art.isEmpty() -> ""
+                        art.startsWith("http") -> art
+                        else -> "https://img4.kuwo.cn" + if (art.startsWith("/")) art else "/$art"
+                    },
+                )
+            )
+        }
+        return out
+    }
+
+    /** Kugou metadata search (public endpoint, mirrors desktop vanta). */
+    fun searchKugou(keyword: String, limit: Int = 20): List<Song> {
+        val q = enc(keyword)
+        val body = Http.get(
+            "https://songsearch.kugou.com/song_search_v2?keyword=$q&page=1&pagesize=$limit" +
+                "&userid=0&clientver=&platform=WebFilter&filter=2&iscorrection=1" +
+                "&privilege_filter=0&area_code=1",
+            headers = mapOf("Referer" to "https://www.kugou.com/")
+        ) ?: return emptyList()
+        val root = try { JSONObject(body) } catch (_: Exception) { return emptyList() }
+        if (root.optInt("error_code", -1) != 0) return emptyList()
+        val arr = root.optJSONObject("data")?.optJSONArray("lists") ?: return emptyList()
+        val out = ArrayList<Song>(arr.length())
+        for (i in 0 until arr.length()) {
+            val s = arr.optJSONObject(i) ?: continue
+            val audioId = s.optString("Audioid", "")
+            if (audioId.isEmpty()) continue
+            val singer = s.optString("SingerName", "")
+                .ifEmpty { s.optString("Singer", "").ifEmpty { s.optString("singer", "") } }
+            out.add(
+                Song(
+                    id = audioId,
+                    source = "kg",
+                    name = s.optString("SongName", ""),
+                    singer = singer,
+                    album = s.optString("AlbumName", ""),
+                    interval = fmtDuration(durationSeconds(s.opt("Duration"))),
+                    img = s.optString("Image", "").ifEmpty { s.optString("img", "") },
+                )
+            )
+        }
+        return out
+    }
+
+    /**
+     * Aggregate metadata search across all public providers, in parallel.
+     * Keyed by source code (tx/wy/kw/kg); a failed provider yields an empty list.
+     */
+    fun searchAllBySource(keyword: String, limit: Int = 20): Map<String, List<Song>> {
+        val out = java.util.concurrent.ConcurrentHashMap<String, List<Song>>()
+        val tasks = listOf(
+            "tx" to { searchQQ(keyword, limit) },
+            "wy" to { searchNetease(keyword, limit) },
+            "kw" to { searchKuwo(keyword, limit) },
+            "kg" to { searchKugou(keyword, limit) },
+        )
+        val threads = tasks.map { (key, fn) ->
+            Thread {
+                out[key] = try { fn() } catch (_: Exception) { emptyList() }
+            }.also { it.isDaemon = true }
+        }
+        threads.forEach { it.start() }
+        threads.forEach { it.join(20000) }
+        return out.toMap()
     }
 
     // ---------- playback URL resolution: user-imported scripts only ----------
@@ -233,5 +317,35 @@ object Sources {
         if (sec <= 0) return "--:--"
         val s = if (sec > 10000) sec / 1000 else sec
         return "%02d:%02d".format(s / 60, s % 60)
+    }
+
+    /**
+     * Normalize a duration field to seconds. Accepts a seconds number,
+     * a "m:ss" / "h:mm:ss" string, a numeric string, or milliseconds.
+     * Mirrors desktop vanta's _normalizeDurationSeconds.
+     */
+    private fun durationSeconds(v: Any?): Long {
+        when (v) {
+            is Number -> {
+                val s = v.toLong()
+                return if (s > 10000) s / 1000 else s
+            }
+            is String -> {
+                val t = v.trim()
+                if (t.isEmpty()) return 0
+                if (Regex("""^\d+(?::\d+){1,2}$""").matches(t)) {
+                    val p = t.split(":").mapNotNull { it.toLongOrNull() }
+                    return when (p.size) {
+                        3 -> p[0] * 3600 + p[1] * 60 + p[2]
+                        2 -> p[0] * 60 + p[1]
+                        else -> 0
+                    }
+                }
+                val n = t.toDoubleOrNull() ?: return 0
+                val s = n.toLong()
+                return if (s > 10000) s / 1000 else s
+            }
+        }
+        return 0
     }
 }

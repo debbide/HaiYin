@@ -26,6 +26,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.rounded.*
 import androidx.compose.material.ripple.rememberRipple
 import androidx.compose.material3.*
@@ -92,7 +93,8 @@ class MainActivity : ComponentActivity() {
     fun HaiYinApp() {
         var tab by remember { mutableStateOf(0) }   // 0: 发现/搜索, 1: 收藏, 2: 导歌单, 3: 音源脚本
         var query by remember { mutableStateOf("") }
-        var results by remember { mutableStateOf(listOf<Sources.Song>()) }
+        var resultsBySource by remember { mutableStateOf(mapOf<String, List<Sources.Song>>()) }
+        var sourceTab by remember { mutableStateOf("tx") }   // tx QQ音乐 / wy 网易云 / kw 酷我 / kg 酷狗
         var searching by remember { mutableStateOf(false) }
         var status by remember { mutableStateOf("输入歌曲或歌手，即点即播") }
         var quality by remember { mutableStateOf("320k") }
@@ -147,12 +149,13 @@ class MainActivity : ComponentActivity() {
                 status = "正在多源检索中…"
                 tab = 0
                 scope.launch {
-                    val songs = withContext(Dispatchers.IO) {
-                        try { Sources.searchAll(query.trim()) } catch (_: Exception) { emptyList() }
+                    val map = withContext(Dispatchers.IO) {
+                        try { Sources.searchAllBySource(query.trim()) } catch (_: Exception) { emptyMap() }
                     }
-                    results = songs
+                    resultsBySource = map
                     searching = false
-                    status = if (songs.isEmpty()) "未找到相关歌曲，换个词试试" else "检索到 ${songs.size} 首歌曲 · 点击即播"
+                    val total = map.values.sumOf { it.size }
+                    status = if (total == 0) "未找到相关歌曲，换个词试试" else "检索到 $total 首歌曲 · 点击即播"
                 }
             }
         }
@@ -252,7 +255,9 @@ class MainActivity : ComponentActivity() {
                             onSearch = { doSearch() },
                             searching = searching,
                             status = status,
-                            results = results,
+                            resultsBySource = resultsBySource,
+                            sourceTab = sourceTab,
+                            onSourceTab = { sourceTab = it },
                             playerState = playerState,
                             quality = quality,
                             favVersion = favVersion,
@@ -286,7 +291,8 @@ class MainActivity : ComponentActivity() {
                                         }
                                         importing = false
                                         if (songs.isNotEmpty()) {
-                                            results = songs
+                                            resultsBySource = mapOf("wy" to songs)
+                                            sourceTab = "wy"
                                             tab = 0
                                             status = "歌单已导入：${songs.size} 首歌曲 · 点击即播"
                                         } else {
@@ -373,12 +379,22 @@ class MainActivity : ComponentActivity() {
         onSearch: () -> Unit,
         searching: Boolean,
         status: String,
-        results: List<Sources.Song>,
+        resultsBySource: Map<String, List<Sources.Song>>,
+        sourceTab: String,
+        onSourceTab: (String) -> Unit,
         playerState: Player.State,
         quality: String,
         favVersion: Int,
         onPlayQueue: (List<Sources.Song>, Int) -> Unit,
     ) {
+        // source tabs: TX default first (QQ has artwork)
+        val sourceTabs = listOf(
+            "tx" to "QQ音乐",
+            "wy" to "网易云",
+            "kw" to "酷我",
+            "kg" to "酷狗",
+        )
+        val visible = resultsBySource[sourceTab].orEmpty()
         Column(modifier = Modifier.fillMaxSize()) {
             // Modern Search Input Field
             Box(
@@ -450,20 +466,55 @@ class MainActivity : ComponentActivity() {
                 modifier = Modifier.padding(horizontal = 22.dp, vertical = 6.dp)
             )
 
+            // Source tabs (only after a search / import produced results)
+            if (resultsBySource.isNotEmpty()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    sourceTabs.forEach { (key, label) ->
+                        val count = resultsBySource[key]?.size ?: 0
+                        val selected = sourceTab == key
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(if (selected) D.accent else D.surfaceVar)
+                                .border(
+                                    1.dp,
+                                    if (selected) D.accent else D.surfaceBorder,
+                                    RoundedCornerShape(10.dp)
+                                )
+                                .clickable { onSourceTab(key) }
+                                .padding(horizontal = 12.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                if (count > 0) "$label $count" else label,
+                                fontSize = 12.sp,
+                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                                color = if (selected) Color.White else D.textDim
+                            )
+                        }
+                    }
+                }
+            }
+
             // Songs List
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp)
             ) {
-                items(results.size) { i ->
-                    val song = results[i]
+                items(visible.size) { i ->
+                    val song = visible[i]
                     val isFav = remember(favVersion, song.id, song.source) { Favorites.isFav(song) }
                     ModernSongCard(
                         song = song,
                         isCurrent = (i == playerState.index && playerState.queue.getOrNull(i)?.id == song.id),
                         isPlaying = playerState.playing,
                         isFav = isFav,
-                        onClick = { onPlayQueue(results, i) }
+                        showSourceBadge = false,
+                        onClick = { onPlayQueue(visible, i) }
                     )
                 }
             }
@@ -802,6 +853,7 @@ class MainActivity : ComponentActivity() {
         isCurrent: Boolean,
         isPlaying: Boolean,
         isFav: Boolean,
+        showSourceBadge: Boolean = true,
         onClick: () -> Unit,
     ) {
         val bg = if (isCurrent) D.accent.copy(alpha = 0.12f) else Color.Transparent
@@ -823,7 +875,7 @@ class MainActivity : ComponentActivity() {
             verticalAlignment = Alignment.CenterVertically
         ) {
             // Album Art Thumbnail
-            CoverArt(song.img, song.source, isCurrent)
+            CoverArt(song.img, song.source, isCurrent, showSourceBadge)
 
             Spacer(Modifier.width(12.dp))
 
@@ -868,7 +920,7 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    fun CoverArt(url: String, source: String, isCurrent: Boolean) {
+    fun CoverArt(url: String, source: String, isCurrent: Boolean, showBadge: Boolean = true) {
         var bitmap by remember(url) { mutableStateOf<Bitmap?>(null) }
         LaunchedEffect(url) {
             if (url.isNotBlank()) {
@@ -900,26 +952,19 @@ class MainActivity : ComponentActivity() {
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize()
                 )
-                // source badge stays visible as a corner chip when art loads
-                Text(
-                    source.uppercase(),
-                    fontSize = 8.sp,
-                    color = Color.White,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .background(
-                            Color.Black.copy(alpha = 0.55f),
-                            RoundedCornerShape(topStart = 6.dp)
-                        )
-                        .padding(horizontal = 5.dp, vertical = 2.dp)
-                )
-            } else {
+            } else if (showBadge) {
                 Text(
                     source.uppercase(),
                     fontSize = 11.sp,
                     color = if (isCurrent) D.accent else D.textDim,
                     fontWeight = FontWeight.Bold
+                )
+            } else {
+                Icon(
+                    Icons.Filled.MusicNote,
+                    contentDescription = null,
+                    tint = D.textFaint,
+                    modifier = Modifier.size(22.dp)
                 )
             }
         }
