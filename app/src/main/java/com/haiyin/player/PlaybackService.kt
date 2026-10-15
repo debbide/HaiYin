@@ -46,7 +46,7 @@ class PlaybackService : Service() {
             }
         }
 
-        fun buildNotif(context: Context): Notification {
+        fun buildNotif(context: Context, largeIcon: android.graphics.Bitmap? = null): Notification {
             val st = Player.state.value
             val song = st.queue.getOrNull(st.index)
             val style = androidx.media.app.NotificationCompat.MediaStyle()
@@ -63,6 +63,7 @@ class PlaybackService : Service() {
                 )
                 .addAction(android.R.drawable.ic_media_next, "下一曲", pi(context, ACTION_NEXT))
                 .setStyle(style.setShowActionsInCompactView(0, 1, 2))
+            if (largeIcon != null) builder.setLargeIcon(largeIcon)
             if (song != null) {
                 builder.setContentTitle(song.name).setContentText(song.singer)
             } else {
@@ -95,8 +96,73 @@ class PlaybackService : Service() {
             if (!hasNotifPermission(context)) return
             try {
                 ensureChannel(context)
+                ensureMediaSession(context)
+                updateSession(null)
                 val nm = context.getSystemService(NotificationManager::class.java)
                 nm.notify(NOTIF_ID, buildNotif(context))
+                // artwork is loaded async: patch session art + notification icon when ready
+                val song = Player.state.value.queue.getOrNull(Player.state.value.index)
+                if (song != null && song.img.isNotBlank()) {
+                    Thread {
+                        try {
+                            val bmp = CoverLoader.get(song.img) ?: return@Thread
+                            val cur = Player.state.value.queue.getOrNull(Player.state.value.index)
+                            if (cur?.id != song.id) return@Thread  // user moved on
+                            updateSession(bmp)
+                            nm.notify(NOTIF_ID, buildNotif(context, bmp))
+                        } catch (_: Exception) {}
+                    }.also { it.isDaemon = true }.start()
+                }
+            } catch (_: Exception) {}
+        }
+
+        /**
+         * Feed title/artist/artwork + playback state into the MediaSession.
+         * Android 11+ renders both the notification-shade media card and the
+         * lock-screen card from this metadata — without it the lock screen
+         * shows an empty card.
+         */
+        private fun updateSession(art: android.graphics.Bitmap?) {
+            val session = mediaSession ?: return
+            val st = Player.state.value
+            val song = st.queue.getOrNull(st.index)
+            try {
+                val mm = android.support.v4.media.MediaMetadataCompat.Builder()
+                    .putString(
+                        android.support.v4.media.MediaMetadataCompat.METADATA_KEY_TITLE,
+                        song?.name ?: "海音"
+                    )
+                    .putString(
+                        android.support.v4.media.MediaMetadataCompat.METADATA_KEY_ARTIST,
+                        song?.singer ?: ""
+                    )
+                    .putString(
+                        android.support.v4.media.MediaMetadataCompat.METADATA_KEY_ALBUM,
+                        song?.album ?: ""
+                    )
+                    .putLong(
+                        android.support.v4.media.MediaMetadataCompat.METADATA_KEY_DURATION,
+                        st.durationMs.coerceAtLeast(0)
+                    )
+                if (art != null) {
+                    mm.putBitmap(android.support.v4.media.MediaMetadataCompat.METADATA_KEY_ART, art)
+                }
+                session.setMetadata(mm.build())
+                val pb = android.support.v4.media.session.PlaybackStateCompat.Builder()
+                    .setActions(
+                        android.support.v4.media.session.PlaybackStateCompat.ACTION_PLAY or
+                            android.support.v4.media.session.PlaybackStateCompat.ACTION_PAUSE or
+                            android.support.v4.media.session.PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
+                            android.support.v4.media.session.PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS
+                    )
+                    .setState(
+                        if (st.playing) android.support.v4.media.session.PlaybackStateCompat.STATE_PLAYING
+                        else android.support.v4.media.session.PlaybackStateCompat.STATE_PAUSED,
+                        st.positionMs.coerceAtLeast(0),
+                        1.0f
+                    )
+                    .build()
+                session.setPlaybackState(pb)
             } catch (_: Exception) {}
         }
     }
