@@ -64,7 +64,7 @@ object Lyrics {
         }
         // LRCLIB by metadata (open, no key)
         if (song.name.isNotBlank()) {
-            lyricFromLrclib(song.name, song.singer)?.let { return it }
+            lyricFromLrclib(song)?.let { return it }
         }
         // netease search fallback
         if (song.name.isNotBlank()) {
@@ -113,13 +113,21 @@ object Lyrics {
         }
     }
 
-    private fun lyricFromLrclib(title: String, artist: String): List<Line>? {
+    private fun lyricFromLrclib(song: Sources.Song): List<Line>? {
         return try {
             val params = buildString {
-                append("track_name=").append(enc(title))
-                if (artist.isNotBlank()) append("&artist_name=").append(enc(artist))
+                append("track_name=").append(enc(song.name))
+                if (song.singer.isNotBlank()) append("&artist_name=").append(enc(song.singer))
+                // duration avoids matching live/extended versions with wrong timelines
+                val durSec = song.interval.split(":").let { p ->
+                    if (p.size == 2) (p[0].toIntOrNull() ?: 0) * 60 + (p[1].toIntOrNull() ?: 0) else 0
+                }
+                if (durSec > 0) append("&duration=").append(durSec)
             }
-            val body = Http.get("https://lrclib.net/api/get?$params") ?: return null
+            val body = Http.get(
+                "https://lrclib.net/api/get?$params",
+                headers = mapOf("User-Agent" to UA_WIN)
+            ) ?: return null
             val o = JSONObject(body)
             if (o.optBoolean("instrumental", false)) return null
             val lyric = o.optString("syncedLyrics", "")
