@@ -107,24 +107,7 @@ object Player {
             castExecutor.execute {
                 try {
                     if (newPlaying) {
-                        // 1. Try standard UPnP Play action first
-                        val ok = Dlna.resume(dev)
-                        try { Thread.sleep(300) } catch (_: Exception) {}
-                        val state = Dlna.transportState(dev)
-                        // 2. If device cannot resume directly (e.g. state is STOPPED or action failed),
-                        // re-cast the stream and seek to the saved timestamp
-                        if (!ok || state != "PLAYING") {
-                            val song = currentSong() ?: return@execute
-                            val qualityNow = _state.value.quality
-                            val url = try { Sources.resolveUrl(song, qualityNow) } catch (_: Exception) { null } ?: return@execute
-                            val proxiedUrl = try { StreamProxy.proxy(url) } catch (_: Exception) { url }
-                            Dlna.cast(dev, proxiedUrl, song.name, song.singer)
-                            val resumePos = _state.value.positionMs
-                            if (resumePos > 2000) {
-                                try { Thread.sleep(400) } catch (_: Exception) {}
-                                Dlna.seek(dev, resumePos)
-                            }
-                        }
+                        resumeCastPlayback(dev)
                     } else {
                         // Pause; if device rejects Pause, fallback to Stop
                         val ok = Dlna.pause(dev)
@@ -148,6 +131,50 @@ object Player {
             }
             appContext?.let { PlaybackService.refresh(it) }
         } catch (_: Exception) {}
+    }
+
+    /**
+     * Resume renderer playback robustly:
+     *  1. send Play, then poll for PLAYING — renderers go through TRANSITIONING
+     *     while re-buffering, so a single fixed-delay check false-triggers a
+     *     disruptive re-cast;
+     *  2. only re-cast (fresh URI + seek) when the renderer is in a definitive
+     *     dead state (STOPPED / PAUSED_PLAYBACK / NO_MEDIA_PRESENT) —
+     *     never interrupt TRANSITIONING.
+     */
+    private fun resumeCastPlayback(dev: Dlna.Device) {
+        try { Dlna.resume(dev) } catch (_: Exception) {}
+        if (waitForTransportState(dev, "PLAYING", 8000)) return
+
+        val state = try { Dlna.transportState(dev) } catch (_: Exception) { null }
+        // TRANSITIONING (or unknown): the renderer is working on it — don't interrupt.
+        if (state != "STOPPED" && state != "PAUSED_PLAYBACK" && state != "NO_MEDIA_PRESENT") return
+
+        val song = currentSong() ?: return
+        val url = try { Sources.resolveUrl(song, _state.value.quality) } catch (_: Exception) { null } ?: return
+        val proxiedUrl = try { StreamProxy.proxy(url) } catch (_: Exception) { url }
+        val castOk = try { Dlna.cast(dev, proxiedUrl, song.name, song.singer) } catch (_: Exception) { false }
+        if (!castOk) return
+        // Seek only after PLAYING is confirmed — blind seeks mid-transition are
+        // rejected (or worse, abort playback) on strict renderers.
+        if (waitForTransportState(dev, "PLAYING", 10000)) {
+            val resumePos = _state.value.positionMs
+            if (resumePos > 2000) {
+                try { Dlna.seek(dev, resumePos) } catch (_: Exception) {}
+            }
+        }
+    }
+
+    /** Poll GetTransportInfo until [want] or timeout. Runs on castExecutor. */
+    private fun waitForTransportState(dev: Dlna.Device, want: String, timeoutMs: Long): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (castDevice !== dev) return false
+            val s = try { Dlna.transportState(dev) } catch (_: Exception) { null }
+            if (s == want) return true
+            try { Thread.sleep(500) } catch (_: Exception) { return false }
+        }
+        return false
     }
 
     fun seekTo(fraction: Float) {
