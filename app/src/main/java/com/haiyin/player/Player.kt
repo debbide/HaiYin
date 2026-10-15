@@ -218,7 +218,12 @@ object Player {
             val url = try { Sources.resolveUrl(song, _state.value.quality) } catch (e: Exception) { null }
             if (gen != generation) return@Thread   // user moved on
             if (url == null) {
-                _state.value = _state.value.copy(resolving = false, error = "解析失败：${song.name}")
+                val reason = SourceScripts.lastResolveError
+                _state.value = _state.value.copy(
+                    resolving = false,
+                    error = if (reason.isNullOrBlank()) "解析失败：${song.name}"
+                    else "解析失败：${song.name}（$reason）"
+                )
                 try { Thread.sleep(1500) } catch (_: InterruptedException) { return@Thread }
                 if (gen != generation) return@Thread
                 if (currentSong() == song) next()

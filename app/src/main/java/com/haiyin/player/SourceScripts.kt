@@ -277,12 +277,21 @@ object SourceScripts {
      * [sourceId]. Tries last-successful entry first, then the rest in order.
      * Returns null when nothing is imported for the platform or all fail.
      */
+    /** Last resolve failure reason, for surfacing in UI diagnostics. */
+    @Volatile
+    var lastResolveError: String? = null
+        private set
+
     fun resolveMusicUrl(sourceId: String, song: Sources.Song, quality: String): String? {
-        val ctx = appContext ?: return null
+        val ctx = appContext ?: run { lastResolveError = "SourceScripts 未初始化"; return null }
         val key = sourceId.trim().lowercase()
         val candidates = candidatesFor(sourceId)
-        if (candidates.isEmpty()) return null
+        if (candidates.isEmpty()) {
+            lastResolveError = "没有可用线路（${key}）"
+            return null
+        }
         val info = musicInfoJson(song, sourceId)
+        var lastErr: String? = null
         for (entry in candidates) {
             try {
                 val rt = runtimes.getOrPut(sha1(entry.script)) { LxRuntime.get(ctx, entry.script) }
@@ -292,12 +301,16 @@ object SourceScripts {
                 val url = rt.resolveMusicUrl(entry.providerId, info, quality)
                 if (url.isNotBlank()) {
                     rememberLastUsed(key, entry.id)
+                    lastResolveError = null
                     return url
                 }
-            } catch (_: Exception) {
+                lastErr = "脚本返回空地址"
+            } catch (e: Exception) {
+                lastErr = e.message ?: e.javaClass.simpleName
                 // try next candidate
             }
         }
+        lastResolveError = lastErr ?: "未知错误"
         return null
     }
 
