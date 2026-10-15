@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import androidx.compose.animation.*
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -45,6 +46,7 @@ import kotlinx.coroutines.withContext
 /**
  * Modern Immersive Full-screen Player (Apple Music / Spotify Ambient Glow Style).
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun FullPlayerScreen(
     st: Player.State,
