@@ -97,7 +97,6 @@ class MainActivity : ComponentActivity() {
         var sourceTab by remember { mutableStateOf("tx") }   // tx QQ音乐 / wy 网易云 / kw 酷我 / kg 酷狗
         var searching by remember { mutableStateOf(false) }
         var status by remember { mutableStateOf("输入歌曲或歌手，即点即播") }
-        var quality by remember { mutableStateOf("320k") }
         var showCrashLog by remember { mutableStateOf(false) }
         var showFullPlayer by remember { mutableStateOf(false) }
         val favVersion by Favorites.version.collectAsState()
@@ -195,16 +194,6 @@ class MainActivity : ComponentActivity() {
                     }
 
                     Spacer(Modifier.weight(1f))
-
-                    // Audio Quality Selector Chips
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        listOf("128k" to "128", "320k" to "320", "flac" to "FLAC").forEach { (q, label) ->
-                            SelectChip(label, quality == q) {
-                                quality = q
-                                Player.quality = q
-                            }
-                        }
-                    }
                 }
 
                 // Crash Log Debug Card (Long-press version to toggle)
@@ -259,10 +248,8 @@ class MainActivity : ComponentActivity() {
                             sourceTab = sourceTab,
                             onSourceTab = { sourceTab = it },
                             playerState = playerState,
-                            quality = quality,
                             favVersion = favVersion,
                             onPlayQueue = { list, idx ->
-                                Player.quality = quality
                                 Player.playQueue(list, idx)
                                 ensureService()
                             }
@@ -270,9 +257,7 @@ class MainActivity : ComponentActivity() {
                         1 -> FavoritesTabContent(
                             favVersion = favVersion,
                             playerState = playerState,
-                            quality = quality,
                             onPlayQueue = { list, idx ->
-                                Player.quality = quality
                                 Player.playQueue(list, idx)
                                 ensureService()
                             }
@@ -383,7 +368,6 @@ class MainActivity : ComponentActivity() {
         sourceTab: String,
         onSourceTab: (String) -> Unit,
         playerState: Player.State,
-        quality: String,
         favVersion: Int,
         onPlayQueue: (List<Sources.Song>, Int) -> Unit,
     ) {
@@ -525,7 +509,6 @@ class MainActivity : ComponentActivity() {
     private fun FavoritesTabContent(
         favVersion: Int,
         playerState: Player.State,
-        quality: String,
         onPlayQueue: (List<Sources.Song>, Int) -> Unit,
     ) {
         val favList = remember(favVersion) { Favorites.all }
