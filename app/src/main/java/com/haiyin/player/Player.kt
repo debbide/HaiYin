@@ -133,6 +133,14 @@ object Player {
     // fight it, and toggle taps are ignored until it settles
     @Volatile private var castBusy = false
 
+    // Pause position captured on the DLNA pause tap. This renderer drops
+    // PAUSED_PLAYBACK -> STOPPED ~100ms after every pause, so a bare Play on
+    // resume restarts the track from 0 — we seek back to here instead.
+    // pausedSongId guards against seeking to a stale position after the
+    // track changed without a fresh pause tap.
+    @Volatile private var pausedPositionMs = 0L
+    @Volatile private var pausedSongId: String? = null
+
     fun toggle() {
         // while casting, the remote renderer is the real player
         val dev = castDevice
@@ -147,6 +155,8 @@ object Player {
             if (_state.value.playing) {
                 // pause: flip UI now, confirm against the device on the worker
                 DlnaTrace.log("toggle: pause requested")
+                pausedPositionMs = _state.value.positionMs
+                pausedSongId = currentSong()?.id
                 _state.value = _state.value.copy(playing = false, error = null)
                 castExecutor.execute { pauseCastPlayback(dev) }
             } else {
@@ -204,6 +214,8 @@ object Player {
     /**
      * Resume renderer playback robustly:
      *  1. try Play (covers PAUSED_PLAYBACK on well-behaved renderers);
+     *  1b. on renderers that dropped to STOPPED after pause, seek back to the
+     *      pause point — a bare Play there restarts the track from 0;
      *  2. TRANSITIONING gets extra time — interrupting it with SetAVTransportURI
      *     aborts playback on strict renderers;
      *  3. otherwise do a full re-push (SetAVTransportURI + Play + seek back);
@@ -213,7 +225,11 @@ object Player {
     private fun resumeCastPlayback(dev: Dlna.Device) {
         castBusy = true
         try {
-            DlnaTrace.log("resume: sending Play")
+            // This renderer drops to STOPPED ~100ms after every pause. A bare
+            // Play on STOPPED restarts the track from 0 instead of resuming,
+            // so remember the pre-Play state to seek back afterwards.
+            val stateBefore = tracedTransportState(dev)
+            DlnaTrace.log("resume: sending Play (was $stateBefore)")
             try { Dlna.resume(dev) } catch (_: Exception) {}
             var ok = waitForTransportState(dev, "PLAYING", 5000)
             if (!ok && castDevice === dev) {
@@ -233,6 +249,16 @@ object Player {
             if (ok) {
                 _state.value = _state.value.copy(playing = true, prepared = true, error = null)
                 appContext?.let { try { PlaybackService.refresh(it) } catch (_: Exception) {} }
+                // Play on a STOPPED renderer restarts the track from 0: seek
+                // back to where the pause tap left off (same song only).
+                if (stateBefore == "STOPPED" || stateBefore == "NO_MEDIA_PRESENT") {
+                    val resumePos =
+                        if (currentSong()?.id == pausedSongId) pausedPositionMs else 0L
+                    if (resumePos > 2000) {
+                        DlnaTrace.log("resume: was $stateBefore, seeking back to $resumePos")
+                        try { Dlna.seek(dev, resumePos) } catch (_: Exception) {}
+                    }
+                }
                 // The renderer CLAIMED playing — make sure it isn't lying. Some
                 // renderers report PLAYING while the stream is stalled (silent).
                 // On a frozen position, re-push transparently instead of making
@@ -298,7 +324,12 @@ object Player {
             )
             return false
         }
-        val resumePos = _state.value.positionMs
+        // Prefer the pause-tap position: after this renderer's spontaneous
+        // PAUSED_PLAYBACK -> STOPPED drop, _state.positionMs may have been
+        // zeroed by the poller while the real pause point is in pausedPositionMs.
+        val resumePos =
+            if (song.id == pausedSongId && pausedPositionMs > 2000) pausedPositionMs
+            else _state.value.positionMs
         // pipe through the local proxy: the renderer gets a stable URL with
         // correct UA/Range handling; picky direct links stop failing on TVs.
         val proxiedUrl = try { StreamProxy.proxy(url) } catch (_: Exception) { url }
