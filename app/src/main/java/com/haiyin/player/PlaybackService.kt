@@ -52,7 +52,7 @@ class PlaybackService : Service() {
             val style = androidx.media.app.NotificationCompat.MediaStyle()
             mediaSession?.let { style.setMediaSession(it.sessionToken) }
             val builder = androidx.core.app.NotificationCompat.Builder(context, CHANNEL_ID)
-                .setSmallIcon(R.mipmap.ic_launcher)
+                .setSmallIcon(R.drawable.ic_notification)
                 .setOngoing(true)
                 .setVisibility(androidx.core.app.NotificationCompat.VISIBILITY_PUBLIC)
                 .addAction(android.R.drawable.ic_media_previous, "上一曲", pi(context, ACTION_PREV))
@@ -87,6 +87,14 @@ class PlaybackService : Service() {
                     }
                     override fun onSkipToNext() { Player.next(); refresh(context) }
                     override fun onSkipToPrevious() { Player.previous(); refresh(context) }
+                    override fun onSeekTo(pos: Long) {
+                        val st = Player.state.value
+                        val dur = st.durationMs
+                        if (dur > 0) {
+                            Player.seekTo((pos.coerceIn(0, dur).toFloat() / dur).coerceIn(0f, 1f))
+                        }
+                        refresh(context)
+                    }
                 })
             }
         }
@@ -153,13 +161,15 @@ class PlaybackService : Service() {
                         android.support.v4.media.session.PlaybackStateCompat.ACTION_PLAY or
                             android.support.v4.media.session.PlaybackStateCompat.ACTION_PAUSE or
                             android.support.v4.media.session.PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
-                            android.support.v4.media.session.PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS
+                            android.support.v4.media.session.PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
+                            android.support.v4.media.session.PlaybackStateCompat.ACTION_SEEK_TO
                     )
                     .setState(
                         if (st.playing) android.support.v4.media.session.PlaybackStateCompat.STATE_PLAYING
                         else android.support.v4.media.session.PlaybackStateCompat.STATE_PAUSED,
                         st.positionMs.coerceAtLeast(0),
-                        1.0f
+                        if (st.playing) 1.0f else 0f,
+                        android.os.SystemClock.elapsedRealtime()
                     )
                     .build()
                 session.setPlaybackState(pb)
