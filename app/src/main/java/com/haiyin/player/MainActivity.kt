@@ -366,7 +366,7 @@ class MainActivity : ComponentActivity() {
         }
 
         // Full Screen Player Overlay
-        if (showFullPlayer && playerState.index >= 0) {
+        if (showFullPlayer && playerState.queue.isNotEmpty()) {
             FullPlayerScreen(playerState) { showFullPlayer = false }
         }
     }

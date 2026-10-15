@@ -12,6 +12,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -54,6 +55,7 @@ fun FullPlayerScreen(
 ) {
     val song = st.queue.getOrNull(st.index) ?: return
     val scope = rememberCoroutineScope()
+    var showQueue by remember { mutableStateOf(false) }
 
     // Cover bitmap & dominant color extraction
     var bitmap by remember(song.id) { mutableStateOf<Bitmap?>(null) }
@@ -95,6 +97,7 @@ fun FullPlayerScreen(
             TopBar(
                 song = song,
                 onDismiss = onDismiss,
+                onOpenQueue = { showQueue = true },
             )
 
             Spacer(Modifier.height(8.dp))
@@ -186,12 +189,169 @@ fun FullPlayerScreen(
             Spacer(Modifier.height(16.dp))
         }
     }
+
+    // Now-playing queue sheet
+    if (showQueue) {
+        QueueSheet(
+            st = st,
+            onDismiss = { showQueue = false },
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun QueueSheet(
+    st: Player.State,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+
+    // jump to the current song on open
+    LaunchedEffect(Unit) {
+        val idx = st.index
+        if (idx > 1) listState.scrollToItem((idx - 1).coerceAtLeast(0))
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = D.surface,
+        shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
+        dragHandle = {
+            Box(
+                modifier = Modifier
+                    .padding(vertical = 10.dp)
+                    .size(width = 36.dp, height = 4.dp)
+                    .clip(CircleShape)
+                    .background(D.textFaint)
+            )
+        }
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "播放列表",
+                fontSize = 17.sp,
+                fontWeight = FontWeight.Bold,
+                color = D.textPrimary,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                "${st.queue.size} 首",
+                fontSize = 12.sp,
+                color = D.textDim
+            )
+        }
+        Spacer(Modifier.height(4.dp))
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.fillMaxWidth(),
+            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
+            itemsIndexed(
+                st.queue,
+                key = { i, s -> "$i-${s.id}" }
+            ) { i, s ->
+                val isCurrent = i == st.index
+                val dismissState = rememberSwipeToDismissBoxState(
+                    confirmValueChange = { v ->
+                        if (v != SwipeToDismissBoxValue.Settled) {
+                            Player.removeAt(i)
+                        }
+                        false
+                    }
+                )
+                SwipeToDismissBox(
+                    state = dismissState,
+                    enableDismissFromStartToEnd = false,
+                    backgroundContent = {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(D.fav.copy(alpha = 0.15f))
+                                .padding(horizontal = 20.dp),
+                            contentAlignment = Alignment.CenterEnd
+                        ) {
+                            Icon(
+                                Icons.Rounded.Delete,
+                                contentDescription = "删除",
+                                tint = D.fav,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+                    }
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (isCurrent) D.accent.copy(alpha = 0.12f) else Color.Transparent)
+                            .clickable {
+                                if (!isCurrent) {
+                                    Player.playAt(i)
+                                    scope.launch { sheetState.hide() }.invokeOnCompletion {
+                                        onDismiss()
+                                    }
+                                }
+                            }
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (isCurrent) {
+                            Icon(
+                                Icons.Rounded.GraphicEq,
+                                contentDescription = null,
+                                tint = D.accent,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        } else {
+                            Text(
+                                "${i + 1}",
+                                fontSize = 13.sp,
+                                color = D.textFaint,
+                                modifier = Modifier.width(20.dp),
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                        Spacer(Modifier.width(10.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                s.name,
+                                fontSize = 15.sp,
+                                fontWeight = if (isCurrent) FontWeight.SemiBold else FontWeight.Normal,
+                                color = if (isCurrent) D.accent else D.textPrimary,
+                                maxLines = 1
+                            )
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                s.singer,
+                                fontSize = 12.sp,
+                                color = D.textDim,
+                                maxLines = 1
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.height(24.dp))
+    }
 }
 
 @Composable
 private fun TopBar(
     song: Sources.Song,
     onDismiss: () -> Unit,
+    onOpenQueue: () -> Unit,
 ) {
     var timerMenu by remember { mutableStateOf(false) }
 
@@ -239,8 +399,25 @@ private fun TopBar(
             )
         }
 
-        // Sleep Timer Button
-        Box {
+        // Queue + Sleep Timer buttons
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(
+                onClick = onOpenQueue,
+                modifier = Modifier
+                    .size(40.dp)
+                    .background(D.surfaceBorder, CircleShape)
+            ) {
+                Icon(
+                    Icons.Rounded.QueueMusic,
+                    contentDescription = "播放列表",
+                    tint = D.textDim,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+            Box {
             IconButton(
                 onClick = { timerMenu = !timerMenu },
                 modifier = Modifier
@@ -277,6 +454,7 @@ private fun TopBar(
                         }
                     )
                 }
+            }
             }
         }
     }

@@ -51,6 +51,38 @@ object Player {
         resolveAndPlay()
     }
 
+    /**
+     * Remove a song from the queue. If it was before the current song the index
+     * shifts down; if it was the current song, playback continues with the song
+     * now at that position (or stops when the queue is empty).
+     */
+    fun removeAt(index: Int) {
+        val st = _state.value
+        if (index !in st.queue.indices) return
+        val newQueue = st.queue.toMutableList().also { it.removeAt(index) }
+        when {
+            newQueue.isEmpty() -> {
+                try { mediaPlayer?.pause() } catch (_: Exception) {}
+                val dev = castDevice
+                if (dev != null) castExecutor.execute { try { Dlna.stop(dev) } catch (_: Exception) {} }
+                _state.value = st.copy(
+                    queue = emptyList(), index = 0,
+                    playing = false, prepared = false, positionMs = 0
+                )
+            }
+            index < st.index ->
+                _state.value = st.copy(queue = newQueue, index = st.index - 1)
+            index == st.index -> {
+                val newIndex = index.coerceAtMost(newQueue.lastIndex)
+                _state.value = st.copy(queue = newQueue, index = newIndex, error = null)
+                resolveAndPlay()
+            }
+            else ->
+                _state.value = st.copy(queue = newQueue)
+        }
+        appContext?.let { PlaybackService.refresh(it) }
+    }
+
     fun playAt(index: Int) {
         if (index in _state.value.queue.indices) {
             _state.value = _state.value.copy(index = index, error = null)
