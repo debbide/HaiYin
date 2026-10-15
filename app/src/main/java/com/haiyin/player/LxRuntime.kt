@@ -248,9 +248,14 @@ class LxRuntime private constructor(
         val bodyStream = if (code in 200..399) conn.inputStream else conn.errorStream
         val body = bodyStream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
         conn.disconnect()
+        val bodyValue: Any = try {
+            JSONObject(body)
+        } catch (_: Exception) {
+            try { JSONArray(body) } catch (_: Exception) { body }
+        }
         val resp = JSONObject().apply {
             put("statusCode", code)
-            put("body", try { JSONObject(body); body } catch (_: Exception) { body })
+            put("body", bodyValue)
             put("headers", JSONObject())
         }
         return resp.toString()
