@@ -60,32 +60,10 @@ object Sources {
     }
 
     fun searchQQ(keyword: String, limit: Int = 20): List<Song> {
-        val payload = JSONObject().apply {
-            put("req_1", JSONObject().apply {
-                put("method", "DoSearchForQQMusicDesktop")
-                put("module", "music.search.SearchCgiService")
-                put("param", JSONObject().apply {
-                    put("num_per_page", limit)
-                    put("page_num", 1)
-                    put("query", keyword)
-                    put("search_type", 0)
-                })
-            })
-        }.toString()
-        val body = Http.post(
-            "https://u.y.qq.com/cgi-bin/musicu.fcg",
-            payload,
-            headers = mapOf(
-                "Referer" to "https://y.qq.com/",
-                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-            )
-        ) ?: return emptyList()
-        val list = JSONObject(body).optJSONObject("req_1")?.optJSONObject("data")
-            ?.optJSONObject("body")?.optJSONObject("song")?.optJSONArray("list")
-            ?: return emptyList()
-        val out = ArrayList<Song>(list.length())
-        for (i in 0 until list.length()) {
-            val s = list.optJSONObject(i) ?: continue
+        // Mobile endpoint first (mirrors desktop vanta), desktop endpoint as fallback.
+        val raws = searchQQMobile(keyword, limit).ifEmpty { searchQQDesktop(keyword, limit) }
+        val out = ArrayList<Song>(raws.size)
+        for (s in raws) {
             val mid = s.optString("mid", "")
             if (mid.isEmpty()) continue
             val singers = s.optJSONArray("singer")
@@ -110,6 +88,76 @@ object Sources {
             )
         }
         return out
+    }
+
+    /** QQ mobile search: same payload shape as desktop vanta. */
+    private fun searchQQMobile(keyword: String, limit: Int): List<JSONObject> {
+        val payload = JSONObject().apply {
+            put("comm", JSONObject().apply {
+                put("ct", "11")
+                put("cv", "14090508")
+            })
+            put("req", JSONObject().apply {
+                put("module", "music.search.SearchCgiService")
+                put("method", "DoSearchForQQMusicMobile")
+                put("param", JSONObject().apply {
+                    put("search_type", 0)
+                    put("query", keyword)
+                    put("page_num", 1)
+                    put("num_per_page", limit)
+                })
+            })
+        }.toString()
+        val body = Http.post(
+            "https://u.y.qq.com/cgi-bin/musicu.fcg",
+            payload,
+            headers = mapOf("User-Agent" to "QQMusic 14090508(android 12)")
+        ) ?: return emptyList()
+        return extractQqItems(body, "req")
+    }
+
+    /** QQ desktop search (previous behavior, kept as fallback). */
+    private fun searchQQDesktop(keyword: String, limit: Int): List<JSONObject> {
+        val payload = JSONObject().apply {
+            put("req_1", JSONObject().apply {
+                put("method", "DoSearchForQQMusicDesktop")
+                put("module", "music.search.SearchCgiService")
+                put("param", JSONObject().apply {
+                    put("num_per_page", limit)
+                    put("page_num", 1)
+                    put("query", keyword)
+                    put("search_type", 0)
+                })
+            })
+        }.toString()
+        val body = Http.post(
+            "https://u.y.qq.com/cgi-bin/musicu.fcg",
+            payload,
+            headers = mapOf(
+                "Referer" to "https://y.qq.com/",
+                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            )
+        ) ?: return emptyList()
+        return extractQqItems(body, "req_1")
+    }
+
+    /**
+     * Pull the song array out of a musicu.fcg response. Mobile responses nest it
+     * under data.body.item_song (see desktop vanta); desktop ones under
+     * data.body.song.list.
+     */
+    private fun extractQqItems(body: String, key: String): List<JSONObject> {
+        return try {
+            val data = JSONObject(body).optJSONObject(key)?.optJSONObject("data")
+                ?: return emptyList()
+            val arr = data.optJSONObject("body")?.optJSONArray("item_song")
+                ?: data.optJSONArray("item_song")
+                ?: data.optJSONObject("body")?.optJSONObject("song")?.optJSONArray("list")
+                ?: return emptyList()
+            List(arr.length()) { arr.optJSONObject(it) }.filterNotNull()
+        } catch (_: Exception) {
+            emptyList()
+        }
     }
 
     /** aggregate metadata search across built-in public providers */
