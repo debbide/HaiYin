@@ -12,7 +12,7 @@ import java.util.concurrent.atomic.AtomicLong
 
 /**
  * lx-protocol JS runtime (QuickJS), ported from Vanta's flutter_js bridge design:
- *  - JS land keeps a callback table; native <-> JS talk via a single __hyBridge function
+ *  - JS land keeps a callback table; native <-> JS talk via __hyBridge.post()
  *  - lx.request sends a message to native (JSON string); native does HTTP on its own
  *    executor and calls back into JS with the response
  *  - requests are serialized per runtime (JS engines are single-threaded)
@@ -289,7 +289,7 @@ class LxRuntime private constructor(
             requestHandler: null,
             nextCallbackId: 0,
           };
-          const emit = (message) => globalThis.__hyBridge(JSON.stringify(message));
+          const emit = (message) => globalThis.__hyBridge.post(JSON.stringify(message));
           const bootstrapResponse = {
             body: { code: -1, data: null, message: '', url: '' },
             headers: {},
