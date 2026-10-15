@@ -12,6 +12,8 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -73,8 +75,8 @@ fun FullPlayerScreen(
         }
     }
 
-    // Toggle between Cover View and Pure Lyrics View
-    var showLyricsOnly by remember { mutableStateOf(false) }
+    // Swipe between poster (page 0) and lyrics (page 1)
+    val pagerState = rememberPagerState(pageCount = { 2 })
 
     Box(modifier = Modifier.fillMaxSize()) {
         // 1. Dynamic Ambient Glow Background
@@ -91,58 +93,65 @@ fun FullPlayerScreen(
             TopBar(
                 song = song,
                 onDismiss = onDismiss,
-                showLyricsOnly = showLyricsOnly,
-                onToggleLyrics = { showLyricsOnly = !showLyricsOnly }
             )
 
             Spacer(Modifier.height(8.dp))
 
-            // Body Area (Crossfade between Cover+Lyric preview OR Pure Lyric Stream)
-            Box(
+            // Body Area: horizontal pager (poster | lyrics)
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f),
-                contentAlignment = Alignment.Center
+                horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                if (!showLyricsOnly) {
-                    Column(
+                HorizontalPager(
+                    state = pagerState,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                ) { page ->
+                    Box(
                         modifier = Modifier.fillMaxSize(),
-                        horizontalAlignment = Alignment.CenterHorizontally
+                        contentAlignment = Alignment.Center
                     ) {
-                        Spacer(Modifier.height(12.dp))
-                        // Big Floating Album Art
-                        BigCoverCard(
-                            bitmap = bitmap,
-                            dominantColor = dominantColor,
-                            onClick = { showLyricsOnly = true },
-                            modifier = Modifier.weight(1f, fill = false)
-                        )
-                        Spacer(Modifier.height(18.dp))
-                        // Dual line interactive lyric snippet
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(64.dp)
-                                .clip(RoundedCornerShape(12.dp))
-                                .clickable { showLyricsOnly = true }
-                                .padding(horizontal = 8.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            MiniLyricSnippet(song = song, positionMs = st.positionMs)
+                        if (page == 0) {
+                            // Big Floating Album Art
+                            BigCoverCard(
+                                bitmap = bitmap,
+                                dominantColor = dominantColor,
+                                onClick = { scope.launch { pagerState.animateScrollToPage(1) } },
+                            )
+                        } else {
+                            // Immersive full-height lyrics view with fading edges
+                            PureScrollingLyrics(
+                                song = song,
+                                positionMs = st.positionMs,
+                                durationMs = st.durationMs,
+                                onDismissLyrics = { scope.launch { pagerState.animateScrollToPage(0) } }
+                            )
                         }
                     }
-                } else {
-                    // Immersive full-height lyrics view with fading edges
-                    PureScrollingLyrics(
-                        song = song,
-                        positionMs = st.positionMs,
-                        durationMs = st.durationMs,
-                        onDismissLyrics = { showLyricsOnly = false }
-                    )
+                }
+                // page indicator dots
+                Row(
+                    modifier = Modifier.padding(vertical = 10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    repeat(2) { i ->
+                        val selected = pagerState.currentPage == i
+                        Box(
+                            modifier = Modifier
+                                .size(if (selected) 7.dp else 5.dp)
+                                .clip(CircleShape)
+                                .background(if (selected) D.accent else D.textFaint)
+                                .clickable { scope.launch { pagerState.animateScrollToPage(i) } }
+                        )
+                    }
                 }
             }
 
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(4.dp))
 
             // Progress Slider Area
             ProgressSection(st = st)
@@ -161,8 +170,6 @@ fun FullPlayerScreen(
 private fun TopBar(
     song: Sources.Song,
     onDismiss: () -> Unit,
-    showLyricsOnly: Boolean,
-    onToggleLyrics: () -> Unit,
 ) {
     var timerMenu by remember { mutableStateOf(false) }
 
@@ -424,55 +431,6 @@ private fun ControlsSection(st: Player.State, song: Sources.Song) {
     }
 }
 
-/** 2-line mini lyric preview in cover mode */
-@Composable
-private fun MiniLyricSnippet(song: Sources.Song, positionMs: Long) {
-    var lines by remember(song.id) { mutableStateOf(listOf<Lyrics.Line>()) }
-    var currentLine by remember(song.id) { mutableStateOf(-1) }
-
-    LaunchedEffect(song.id) {
-        lines = withContext(Dispatchers.IO) {
-            try { Lyrics.fetch(song) } catch (_: Exception) { emptyList() }
-        }
-    }
-    LaunchedEffect(positionMs, lines) {
-        if (lines.isEmpty()) return@LaunchedEffect
-        var idx = -1
-        for ((i, l) in lines.withIndex()) {
-            if (l.timeMs <= positionMs) idx = i else break
-        }
-        if (idx != currentLine) currentLine = idx
-    }
-
-    if (lines.isEmpty()) {
-        Text("轻触查看完整歌词", fontSize = 13.sp, color = D.textFaint)
-        return
-    }
-
-    val currentText = lines.getOrNull(currentLine)?.text ?: song.name
-    val nextText = lines.getOrNull(currentLine + 1)?.text ?: ""
-
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(
-            currentText,
-            color = D.accent,
-            fontSize = 15.sp,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 1,
-            textAlign = TextAlign.Center
-        )
-        if (nextText.isNotBlank()) {
-            Spacer(Modifier.height(3.dp))
-            Text(
-                nextText,
-                color = D.textDim.copy(alpha = 0.6f),
-                fontSize = 12.sp,
-                maxLines = 1,
-                textAlign = TextAlign.Center
-            )
-        }
-    }
-}
 
 /** Full-height immersive lyric scroll view with gradient fading mask & click-to-seek */
 @Composable
