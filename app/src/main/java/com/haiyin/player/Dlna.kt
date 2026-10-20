@@ -211,6 +211,15 @@ object Dlna {
             "<InstanceID>0</InstanceID>"
         )
 
+    /** Parse an "H:MM:SS" timestamp to ms, or null. */
+    private fun parseHmsMs(text: String): Long? {
+        val m = Regex("""(\d+):(\d{2}):(\d{2})""").find(text) ?: return null
+        val h = m.groupValues[1].toLongOrNull() ?: return null
+        val mi = m.groupValues[2].toLongOrNull() ?: return null
+        val s = m.groupValues[3].toLongOrNull() ?: return null
+        return ((h * 3600) + (mi * 60) + s) * 1000
+    }
+
     /**
      * GetMediaInfo -> TrackDuration in ms, or null.
      */
@@ -222,30 +231,30 @@ object Dlna {
             "<InstanceID>0</InstanceID>"
         ) ?: return null
         val dur = Regex("""(?i)<TrackDuration>(.*?)</TrackDuration>""").find(resp)?.groupValues?.get(1) ?: return null
-        val m = Regex("""(\d+):(\d{2}):(\d{2})""").find(dur) ?: return null
-        val h = m.groupValues[1].toLongOrNull() ?: return null
-        val mi = m.groupValues[2].toLongOrNull() ?: return null
-        val s = m.groupValues[3].toLongOrNull() ?: return null
-        return ((h * 3600) + (mi * 60) + s) * 1000
+        return parseHmsMs(dur)
     }
 
     /**
-     * GetPositionInfo -> current position in ms, or null.
+     * GetPositionInfo -> (positionMs, trackDurationMs) from a single response;
+     * either may be null. Renderers report the duration here once playback is
+     * under way, even when GetMediaInfo at push time still said 0.
      */
-    fun positionMs(device: Device): Long? {
+    fun positionInfo(device: Device): Pair<Long?, Long?> {
         val resp = soapBody(
             device.controlUrl,
             "urn:schemas-upnp-org:service:AVTransport:1",
             "GetPositionInfo",
             "<InstanceID>0</InstanceID>"
-        ) ?: return null
-        val rel = Regex("""(?i)<RelTime>(.*?)</RelTime>""").find(resp)?.groupValues?.get(1) ?: return null
-        val m = Regex("""(\d+):(\d{2}):(\d{2})""").find(rel) ?: return null
-        val h = m.groupValues[1].toLongOrNull() ?: return null
-        val mi = m.groupValues[2].toLongOrNull() ?: return null
-        val s = m.groupValues[3].toLongOrNull() ?: return null
-        return ((h * 3600) + (mi * 60) + s) * 1000
+        ) ?: return null to null
+        val rel = Regex("""(?i)<RelTime>(.*?)</RelTime>""").find(resp)?.groupValues?.get(1)
+        val dur = Regex("""(?i)<TrackDuration>(.*?)</TrackDuration>""").find(resp)?.groupValues?.get(1)
+        return (rel?.let { parseHmsMs(it) }) to (dur?.let { parseHmsMs(it) })
     }
+
+    /**
+     * GetPositionInfo -> current position in ms, or null.
+     */
+    fun positionMs(device: Device): Long? = positionInfo(device).first
 
     /**
      * GetTransportInfo -> current state string (PLAYING / PAUSED_PLAYBACK / STOPPED / ...), or null.

@@ -718,6 +718,17 @@ object Player {
         castPushNow()
     }
 
+    /**
+     * Fill in a still-unknown cast duration from a renderer report; renderers
+     * often only learn the duration once playback is under way.
+     */
+    private fun fillDuration(st: State, reported: Long?): Long {
+        if (st.durationMs > 0) return st.durationMs
+        val d = reported?.takeIf { it > 0 } ?: return st.durationMs
+        DlnaTrace.log("poller: duration recovered ${d}ms from renderer")
+        return d
+    }
+
     // poll renderer position while casting: auto-advance at end
     @Volatile private var castPoller: java.util.Timer? = null
 
@@ -732,11 +743,27 @@ object Player {
                     val stateStr = tracedTransportState(dev) ?: return
                     val st = _state.value
 
+                    // While the duration is still unknown, keep asking for it:
+                    // at push time most renderers have not loaded the stream
+                    // yet and report 0, then learn it once playback is under way.
+                    val mediaDur = if (st.durationMs <= 0) {
+                        try { Dlna.durationMs(dev) } catch (_: Exception) { null }
+                    } else {
+                        null
+                    }
+
                     // 1. If user paused playback, never treat STOPPED/PAUSED as "track finished"
                     if (!st.playing) {
-                        val pos = try { Dlna.positionMs(dev) } catch (_: Exception) { null }
-                        if (pos != null && pos > 0) {
-                            _state.value = st.copy(positionMs = pos)
+                        val info = try { Dlna.positionInfo(dev) } catch (_: Exception) { null }
+                        if (info != null) {
+                            val filledDur = fillDuration(st, info.second ?: mediaDur)
+                            val newPos = info.first?.takeIf { it > 0 }
+                            if (newPos != null || filledDur != st.durationMs) {
+                                _state.value = st.copy(
+                                    positionMs = newPos ?: st.positionMs,
+                                    durationMs = filledDur,
+                                )
+                            }
                         }
                         return
                     }
@@ -766,7 +793,8 @@ object Player {
                     // never report STOPPED at track end — they just re-pull the
                     // stream from 0. A position wrap (was far along, now near 0)
                     // while PLAYING is the only end signal such renderers give.
-                    val pos = try { Dlna.positionMs(dev) } catch (_: Exception) { null } ?: return
+                    val info = try { Dlna.positionInfo(dev) } catch (_: Exception) { null } ?: return
+                    val pos = info.first ?: return
                     val inActionGrace = System.currentTimeMillis() - lastCastActionAt < 3500
                     val isPlayingNow = if (inActionGrace) _state.value.playing else (stateStr == "PLAYING")
                     if (inActionGrace) {
@@ -784,6 +812,7 @@ object Player {
                     }
                     _state.value = _state.value.copy(
                         positionMs = pos,
+                        durationMs = fillDuration(st, info.second ?: mediaDur),
                         playing = isPlayingNow,
                         prepared = true,
                     )
